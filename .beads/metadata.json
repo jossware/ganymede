@@ -1,0 +1,7 @@
+{
+  "database": "dolt",
+  "backend": "dolt",
+  "dolt_mode": "embedded",
+  "dolt_database": "ganymede",
+  "project_id": "fed9b79d-1f22-4097-9fb3-9527bf8cf8c3"
+}
