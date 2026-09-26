@@ -4,4 +4,5 @@
 *.db
 .beads-credential-key
 .beads/proxieddb/
+.beads/issues.jsonl
 *.gate.lock*
