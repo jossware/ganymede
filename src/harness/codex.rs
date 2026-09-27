@@ -478,12 +478,13 @@ fn strip_files_section(text: &str) -> String {
         .join("\n")
 }
 
-/// Attachments are listed as `## <name>: <path>`. Any other line, even one
-/// starting with Markdown, is the user's own text.
+/// Attachments are listed as `## <name>: <absolute path>`. Users write
+/// `## Heading: words` too, so the path is what marks an entry.
 fn is_file_entry(line: &str) -> bool {
     line.trim_start()
         .strip_prefix("## ")
-        .is_some_and(|rest| rest.contains(": "))
+        .and_then(|rest| rest.rsplit_once(": "))
+        .is_some_and(|(_, path)| path.starts_with('/'))
 }
 
 /// A `$skill` invocation is titled by its arguments when it has any.
@@ -811,7 +812,12 @@ mod tests {
 
     #[test]
     fn clean_keeps_markdown_request_after_files_section() {
-        for request in ["# Review these files", "- Summarise the risks", "## Plan"] {
+        for request in [
+            "# Review these files",
+            "- Summarise the risks",
+            "## Plan",
+            "## Review: security risks",
+        ] {
             let text =
                 format!("\n# Files mentioned by the user:\n\n## a.md: /x/a.md\n\n{request}\n");
             assert_eq!(clean_user_text(&text), request);
