@@ -1,0 +1,54 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      actions: write
+    env:
+      # Bump to rotate the cache when the archive outgrows its budget.
+      NIX_CACHE_PREFIX: nix-v1-Linux-
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: nixbuild/nix-quick-install-action@v35
+        with:
+          nix_conf: |
+            max-jobs = auto
+
+      - uses: nix-community/cache-nix-action@v7
+        with:
+          primary-key: ${{ env.NIX_CACHE_PREFIX }}${{ hashFiles('flake.nix', 'flake.lock', 'Cargo.lock') }}
+          restore-prefixes-first-match: ${{ env.NIX_CACHE_PREFIX }}
+          # PR scopes are unreadable from main, so a PR save is pure cost.
+          save: ${{ github.ref == 'refs/heads/main' }}
+          purge: ${{ github.ref == 'refs/heads/main' }}
+          purge-prefixes: ${{ env.NIX_CACHE_PREFIX }}
+          purge-created: 0
+          purge-primary-key: never
+
+      # Swatinem/rust-cache probes cargo on PATH, which only nix develop provides.
+      - uses: actions/cache@v6
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('Cargo.lock', 'flake.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-
+
+      - run: nix develop -c cargo fmt --check
+      - run: nix develop -c cargo clippy --locked --all-targets -- -D warnings
+      - run: nix develop -c cargo test --locked
+      - run: nix build -L
