@@ -170,8 +170,151 @@ fn trim_blank<'a>(lines: &'a [&'a str]) -> &'a [&'a str] {
     &lines[start..end]
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Line {
+    Blank,
+    Underline,
+    BlockStart,
+    Text,
+}
+
 fn prose(lines: &[&str]) -> String {
-    lines.join("\n")
+    let classes = classify(lines);
+    let mut out = String::new();
+    let mut i = 0;
+    while i < lines.len() {
+        if i > 0 {
+            out.push('\n');
+        }
+        match classes[i] {
+            Line::Blank => {
+                out.push_str(lines[i]);
+                i += 1;
+            }
+            Line::Underline => {
+                out.push_str(&underline(lines[i]));
+                i += 1;
+            }
+            Line::BlockStart | Line::Text => {
+                // A code span cannot cross into the next block.
+                let end = i
+                    + 1
+                    + classes[i + 1..]
+                        .iter()
+                        .take_while(|&&c| c == Line::Text)
+                        .count();
+                inline(&lines[i..end].join("\n"), &mut out);
+                i = end;
+            }
+        }
+    }
+    out
+}
+
+fn classify(lines: &[&str]) -> Vec<Line> {
+    lines
+        .iter()
+        .enumerate()
+        .map(|(i, line)| {
+            if line.trim().is_empty() {
+                Line::Blank
+            } else if i > 0 && !lines[i - 1].trim().is_empty() && is_underline(line) {
+                Line::Underline
+            } else if is_block_start(line) {
+                Line::BlockStart
+            } else {
+                Line::Text
+            }
+        })
+        .collect()
+}
+
+fn is_underline(line: &str) -> bool {
+    let body = line.trim_start_matches(' ');
+    let run = body.trim_end();
+    line.len() - body.len() <= 3
+        && !run.is_empty()
+        && (run.bytes().all(|b| b == b'-') || run.bytes().all(|b| b == b'='))
+}
+
+fn underline(line: &str) -> String {
+    let run = line.trim();
+    if run.len() >= 3 && run.starts_with('-') {
+        "<hr>".to_string()
+    } else {
+        format!("\\{run}")
+    }
+}
+
+fn is_block_start(line: &str) -> bool {
+    let body = line.trim_start_matches([' ', '\t']);
+    let hashes = run_len(body, '#');
+    if (1..=6).contains(&hashes) {
+        return body[hashes..]
+            .chars()
+            .next()
+            .is_none_or(|c| c == ' ' || c == '\t');
+    }
+    if body.starts_with('>') {
+        return true;
+    }
+    if let Some(rest) = body.strip_prefix(['-', '*', '+']) {
+        return rest.starts_with([' ', '\t']);
+    }
+    let digits = body.len() - body.trim_start_matches(|c: char| c.is_ascii_digit()).len();
+    digits > 0
+        && body[digits..]
+            .strip_prefix(['.', ')'])
+            .is_some_and(|rest| rest.starts_with([' ', '\t']))
+}
+
+fn inline(text: &str, out: &mut String) {
+    let mut i = 0;
+    let mut after_space = true;
+    while let Some(c) = text[i..].chars().next() {
+        let rest = &text[i..];
+        match c {
+            '`' => {
+                let n = run_len(rest, '`');
+                let len = closing_run(&rest[n..], n).map_or(n, |end| n + end + n);
+                out.push_str(&rest[..len]);
+                i += len;
+                after_space = false;
+                continue;
+            }
+            '<' | '>' => {
+                // An odd backslash run would otherwise escape the entity's `&`.
+                if text[..i].bytes().rev().take_while(|&b| b == b'\\').count() % 2 == 1 {
+                    out.push('\\');
+                }
+                out.push_str(if c == '<' { "&lt;" } else { "&gt;" });
+            }
+            '#' if after_space && rest[1..].chars().next().is_some_and(is_tag_char) => {
+                out.push_str("\\#");
+            }
+            _ => out.push(c),
+        }
+        after_space = c.is_whitespace();
+        i += c.len_utf8();
+    }
+}
+
+/// CommonMark closes a span only on a run of equal length.
+fn closing_run(s: &str, n: usize) -> Option<usize> {
+    let mut i = 0;
+    while let Some(offset) = s[i..].find('`') {
+        let start = i + offset;
+        let len = run_len(&s[start..], '`');
+        if len == n {
+            return Some(start);
+        }
+        i = start + len;
+    }
+    None
+}
+
+fn is_tag_char(c: char) -> bool {
+    c.is_alphanumeric() || matches!(c, '_' | '-' | '/')
 }
 
 #[cfg(test)]
@@ -302,5 +445,132 @@ mod tests {
             assert_eq!(blocks(text), want, "text: {text:?}");
         }
         assert_eq!(markdown("\n\nhi\n\n```\nx\n```"), "\n\nhi\n\n```\nx\n```");
+    }
+
+    #[test]
+    fn cc2md_golden_cases() {
+        check(&[
+            (
+                "the trigger (\"let's work on @<task>\")",
+                "the trigger (\"let's work on @&lt;task&gt;\")",
+            ),
+            (
+                "are you sure it's not the @<task> tag?",
+                "are you sure it's not the @&lt;task&gt; tag?",
+            ),
+            (
+                "resolve `<path>` against root",
+                "resolve `<path>` against root",
+            ),
+            (
+                "before\n```\n<task> not html here\n```\nafter <task> here",
+                "before\n```\n<task> not html here\n```\nafter &lt;task&gt; here",
+            ),
+            ("first\n---\nsecond", "first\n<hr>\nsecond"),
+        ]);
+    }
+
+    #[test]
+    fn cc2md_bugs_are_fixed() {
+        check(&[
+            // A lone backtick does not disable escaping in later paragraphs.
+            (
+                "it's a ` tick\n\nthen <x>",
+                "it's a ` tick\n\nthen &lt;x&gt;",
+            ),
+            ("~~~\n<a>\n~~~\n<b>", "~~~\n<a>\n~~~\n&lt;b&gt;"),
+            (
+                "````\n```\n<a>\n```\n````\n<b>",
+                "````\n```\n<a>\n```\n````\n&lt;b&gt;",
+            ),
+            (
+                "1. step\n    ```sh\n    ls <dir>\n    ```\n2. next <x>",
+                "1. step\n```sh\nls <dir>\n```\n2. next &lt;x&gt;",
+            ),
+            ("a\n---", "a\n<hr>"),
+            (r"match \<word\>", r"match \\&lt;word\\&gt;"),
+            (r"even \\<x>", r"even \\&lt;x&gt;"),
+        ]);
+    }
+
+    #[test]
+    fn tags_are_escaped_outside_code() {
+        check(&[
+            ("#todo at start", r"\#todo at start"),
+            ("see #todo and\t#done", "see \\#todo and\t\\#done"),
+            ("issue #123", r"issue \#123"),
+            ("path #a/b", r"path \#a/b"),
+            ("  #indented", r"  \#indented"),
+            ("#日本", r"\#日本"),
+            ("# Heading\n## Sub", "# Heading\n## Sub"),
+            (
+                "foo#bar and https://x.io/a#frag",
+                "foo#bar and https://x.io/a#frag",
+            ),
+            ("#!/bin/sh", "#!/bin/sh"),
+            ("use `#tag` here", "use `#tag` here"),
+            ("```\n#tag\n```", "```\n#tag\n```"),
+        ]);
+    }
+
+    #[test]
+    fn multibyte_text_around_escapes() {
+        check(&[("é<x>é #ü", "é&lt;x&gt;é \\#ü")]);
+    }
+
+    #[test]
+    fn setext_underlines_are_neutralised() {
+        check(&[
+            ("a\n---\nb", "a\n<hr>\nb"),
+            ("a\n  -----  ", "a\n<hr>"),
+            ("a\n\n---\nb", "a\n\n---\nb"),
+            ("---\nb", "---\nb"),
+            ("```\nx\n```\n---", "```\nx\n```\n---"),
+            ("a\n--", "a\n\\--"),
+            ("a\n===", "a\n\\==="),
+            ("a\n    ---", "a\n    ---"),
+            ("a\r\n---\r\nb", "a\r\n<hr>\nb"),
+        ]);
+    }
+
+    #[test]
+    fn code_spans_stop_at_block_boundaries() {
+        check(&[
+            ("a ` b\n---\n<x>`", "a ` b\n<hr>\n&lt;x&gt;`"),
+            ("a ` b\n# H <x> `", "a ` b\n# H &lt;x&gt; `"),
+            ("a ` b\n- item <x> `", "a ` b\n- item &lt;x&gt; `"),
+            ("a ` b\n2) item <x> `", "a ` b\n2) item &lt;x&gt; `"),
+            ("a ` b\n> q <x> `", "a ` b\n&gt; q &lt;x&gt; `"),
+            // Within one paragraph a span may cross a line break.
+            ("a `x\n<y>` b", "a `x\n<y>` b"),
+            ("a ``x ` <y>`` <z>", "a ``x ` <y>`` &lt;z&gt;"),
+        ]);
+    }
+
+    #[test]
+    fn inline_triple_backticks_are_not_a_fence() {
+        check(&[("```ls <dir>```\nthen <x>", "```ls <dir>```\nthen &lt;x&gt;")]);
+    }
+
+    #[test]
+    fn crlf_prose_is_escaped() {
+        check(&[(
+            "```\r\n<a>\r\n```\r\nb <x>",
+            "```\r\n<a>\r\n```\r\nb &lt;x&gt;",
+        )]);
+    }
+
+    #[test]
+    fn blocks_escape_prose_only() {
+        let p = |s: &str| Block::Prose(s.to_string());
+        let f = |s: &str| Block::Fence(s.to_string());
+        assert_eq!(
+            blocks("hi <x>\n```\n<a>\n```\n#tag"),
+            vec![p("hi &lt;x&gt;"), f("```\n<a>\n```"), p(r"\#tag")],
+        );
+        assert_eq!(
+            blocks("are you sure it's not the @<task> tag?"),
+            vec![p("are you sure it's not the @&lt;task&gt; tag?")],
+        );
     }
 }
