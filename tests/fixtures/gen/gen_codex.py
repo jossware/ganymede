@@ -151,6 +151,11 @@ r.item({'type': 'FileChange', 'id': r.iid('call_'), 'changes': {f'{REPO}/src/old
 r.item({'type': 'ImageView', 'id': r.iid(), 'path': 'file://' + REPO + '/shots/header%20bar.png'})
 r.item({'type': 'AgentMessage', 'id': r.iid('msg_'), 'content': [{'type': 'Text', 'text': 'Which pages should I capture?'}], 'phase': 'final_answer', 'questions': [{'title': 'Which pages should I capture?', 'options': ['One of each page type', 'Every page']}]})
 r.end_turn('Which pages should I capture?')
+r.start_turn()
+reply = [{'questionItemId': '["request_user_input_async","call_0001",0]', 'question': 'Which pages should I capture?', 'answer': 'Every page'}]
+r.user('<send_user_message_question_reply>\n' + json.dumps(reply, ensure_ascii=False, separators=(',', ':')) + '\n</send_user_message_question_reply>')
+r.agent('Capturing every page.')
+r.end_turn('Capturing every page.')
 r.write('edges.jsonl')
 
 # Non-interactive sessions the filter skips.

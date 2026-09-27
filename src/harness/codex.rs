@@ -49,6 +49,8 @@ const REQUEST_MARKER: &str = "## My request:";
 const FILES_HEADING: &str = "# Files mentioned by the user:";
 const BROWSER_OPEN: &str = "<in-app-browser-context";
 const BROWSER_CLOSE: &str = "</in-app-browser-context>";
+const REPLY_OPEN: &str = "<send_user_message_question_reply>";
+const REPLY_CLOSE: &str = "</send_user_message_question_reply>";
 
 const INTERACTIVE_SOURCES: &[&str] = &["cli", "vscode"];
 
@@ -399,6 +401,9 @@ fn agent_message(item: &Value, ts: Option<Timestamp>, session: &mut Session) -> 
 
 /// Strips context Codex injects into the user's message.
 fn clean_user_text(text: &str) -> String {
+    if let Some(answers) = question_reply_answers(text) {
+        return answers;
+    }
     // Desktop wraps the request in attachments and UI state, then marks it.
     if let Some(request) = after_request_marker(text) {
         return request.trim().to_string();
@@ -406,6 +411,18 @@ fn clean_user_text(text: &str) -> String {
     strip_files_section(&strip_browser_context(text))
         .trim()
         .to_string()
+}
+
+/// Desktop sends answers to the agent's questions as JSON with internal ids;
+/// only the answers are the user's words.
+fn question_reply_answers(text: &str) -> Option<String> {
+    let json = text
+        .trim()
+        .strip_prefix(REPLY_OPEN)?
+        .strip_suffix(REPLY_CLOSE)?;
+    let replies: Vec<Value> = serde_json::from_str(json).ok()?;
+    let answers: Vec<&str> = replies.iter().filter_map(|r| str_at(r, "answer")).collect();
+    (!answers.is_empty()).then(|| answers.join("\n\n"))
 }
 
 fn after_request_marker(text: &str) -> Option<&str> {
@@ -783,6 +800,22 @@ mod tests {
     }
 
     #[test]
+    fn clean_unwraps_question_replies() {
+        let text = "<send_user_message_question_reply>\n\
+                    [{\"questionItemId\":\"[\\\"q\\\",0]\",\"question\":\"Where?\",\"answer\":\"cobalt\"},\
+                    {\"question\":\"Ready?\",\"answer\":\"yes\"}]\n\
+                    </send_user_message_question_reply>";
+        assert_eq!(clean_user_text(text), "cobalt\n\nyes");
+    }
+
+    #[test]
+    fn clean_keeps_unparseable_question_reply() {
+        let text =
+            "<send_user_message_question_reply>\nnot json\n</send_user_message_question_reply>";
+        assert_eq!(clean_user_text(text), text);
+    }
+
+    #[test]
     fn clean_leaves_plain_text() {
         assert_eq!(clean_user_text("  plain\n\ntext  "), "plain\n\ntext");
     }
@@ -1021,7 +1054,7 @@ mod tests {
     #[test]
     fn edge_items() {
         let s = session("edges.jsonl");
-        assert_eq!(users(&s), ["Summarise the attached notes"]);
+        assert_eq!(users(&s), ["Summarise the attached notes", "Every page"]);
         assert_eq!(thinking(&s), ["Raw chain of thought"]);
         assert_eq!(
             tools(&s),
@@ -1048,7 +1081,10 @@ mod tests {
         );
         assert_eq!(
             assistants(&s),
-            ["Which pages should I capture?\n\n- One of each page type\n- Every page"]
+            [
+                "Which pages should I capture?\n\n- One of each page type\n- Every page",
+                "Capturing every page."
+            ]
         );
     }
 
