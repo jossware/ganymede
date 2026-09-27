@@ -40,9 +40,9 @@ class T:
     def user(self, content, **extra):
         return self.envelope('user', {'role': 'user', 'content': content}, **extra)
 
-    def assistant(self, *blocks, stop='end_turn', msg_id='msg_01Sample'):
+    def assistant(self, *blocks, stop='end_turn', msg_id='msg_01Sample', model=MODEL):
         return self.envelope('assistant', {
-            'model': MODEL, 'id': msg_id, 'type': 'message', 'role': 'assistant',
+            'model': model, 'id': msg_id, 'type': 'message', 'role': 'assistant',
             'content': list(blocks), 'stop_reason': stop, 'stop_sequence': None,
             'usage': {'input_tokens': 2, 'output_tokens': 40}})
 
@@ -152,3 +152,25 @@ t.user('Hello')
 t.raw({'type': 'hologram', 'sessionId': t.sid, 'timestamp': ts()})
 t.assistant({'type': 'server_tool_use', 'id': 'srvtoolu_01', 'name': 'web_search', 'input': {'query': 'rust'}}, text('Hi.'))
 t.write('unknown.jsonl')
+
+# modern: synthetic notice, shell mode, stray output, current tools, MCP,
+# a repeated result, a result-less notification, a compaction summary.
+t = T(sid='5f0c2a1e-0000-4000-8000-000000c0ffee')
+t.user('Check the repo')
+t.assistant(text("You've hit your monthly spend limit"), model='<synthetic>', msg_id='msg_01Synth')
+t.user('<bash-input>ls</bash-input>')
+t.user('<bash-stdout>Cargo.toml</bash-stdout><bash-stderr></bash-stderr>')
+t.user('What does it contain?')
+t.user('<local-command-stdout>stray output</local-command-stdout>')
+t.assistant(tool_use('toolu_01Agent', 'Agent', {'description': 'Survey tests', 'prompt': 'List the tests', 'subagent_type': 'Explore'}),
+            tool_use('toolu_01Skill', 'Skill', {'skill': 'review', 'args': 'src'}), stop='tool_use', msg_id='msg_01Modern1')
+t.user([tool_result('toolu_01Agent', 'Three tests.'), tool_result('toolu_01Skill', 'Launching skill: review')], sourceToolAssistantUUID=t.parent)
+t.assistant(tool_use('toolu_01Ask', 'AskUserQuestion', {'questions': [{'question': 'Which module first?', 'header': 'Module', 'options': [{'label': 'parser'}, {'label': 'cli'}], 'multiSelect': False}]}), stop='tool_use', msg_id='msg_01Modern2')
+t.user([tool_result('toolu_01Ask', 'User answered: parser')], sourceToolAssistantUUID=t.parent)
+t.user([tool_result('toolu_01Ask', 'second answer')])
+t.assistant(tool_use('toolu_01Mcp', 'mcp__plugin_x__server__search', {'query': 'parser', 'limit': 5}), stop='tool_use', msg_id='msg_01Modern3')
+t.user([tool_result('toolu_01Mcp', [text('parser.rs')])], sourceToolAssistantUUID=t.parent)
+t.user('<task-notification>\n<task-id>b1c2d3e4f</task-id>\n<summary>Monitor event: "CI run"</summary>\n<event>CI run completed: success</event>\n</task-notification>')
+t.user('This session is being continued from a previous conversation that ran out of context.\n\nSummary:\n1. The user asked to check the repo.', isCompactSummary=True, isVisibleInTranscriptOnly=True)
+t.assistant(text('Continuing with the parser.'), msg_id='msg_01Modern4')
+t.write('modern.jsonl')

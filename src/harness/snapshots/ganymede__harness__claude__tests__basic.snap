@@ -1,0 +1,82 @@
+---
+source: src/harness/claude.rs
+expression: "session(\"basic.jsonl\")"
+---
+Session {
+    harness: Claude,
+    id: "5f0c2a1e-7b3d-4c9a-9e21-3d4b5a6c7d8e",
+    harness_version: Some(
+        "2.1.259",
+    ),
+    model: Some(
+        "claude-fable-5-1",
+    ),
+    cwds: [
+        "/Users/user/Workspaces/sample",
+        "/Users/user/Worktrees/sample/feature",
+    ],
+    started_at: Some(
+        2026-09-04T02:25:00Z,
+    ),
+    title_source: Some(
+        "Add a greeting to the sample CLI",
+    ),
+    cc_version: Some(
+        "v2.1.259",
+    ),
+    entries: [
+        User {
+            at: Some(
+                2026-09-04T02:25:00Z,
+            ),
+            text: "Add a greeting to the sample CLI",
+        },
+        Thinking {
+            at: Some(
+                2026-09-04T02:25:02.274Z,
+            ),
+            text: "The user wants a greeting. Look at main.rs first.",
+        },
+        Tool {
+            at: Some(
+                2026-09-04T02:25:04.548Z,
+            ),
+            name: "Read",
+            summary: "/Users/user/Workspaces/sample/src/main.rs",
+            output: Some(
+                "1\tfn main() {}\n",
+            ),
+            failed: false,
+        },
+        Tool {
+            at: Some(
+                2026-09-04T02:25:06.822Z,
+            ),
+            name: "Bash",
+            summary: "cargo test",
+            output: Some(
+                "error: could not compile `sample`",
+            ),
+            failed: true,
+        },
+        Tool {
+            at: Some(
+                2026-09-04T02:25:09.233Z,
+            ),
+            name: "Edit",
+            summary: "/Users/user/Worktrees/sample/feature/src/main.rs",
+            output: Some(
+                "The file has been updated.",
+            ),
+            failed: false,
+        },
+        Assistant {
+            at: Some(
+                2026-09-04T02:25:11.507Z,
+            ),
+            text: "Added a `println!` greeting. Tests failed to compile before the edit.",
+        },
+    ],
+    unhandled: {},
+    transcript: "basic.jsonl",
+}

@@ -1512,4 +1512,54 @@ mod tests {
             ("github.ping".to_string(), String::new())
         );
     }
+
+    #[test]
+    fn modern_fixture() {
+        let s = session("modern.jsonl");
+        assert_eq!(s.model.as_deref(), Some("claude-fable-5-1"));
+        assert_eq!(
+            lines(&s),
+            [
+                "user: Check the repo",
+                "assistant: You've hit your monthly spend limit",
+                "user: ! ls",
+                r#"tool: ! [ls] Some("Cargo.toml")"#,
+                "user: What does it contain?",
+                r#"tool: local command [] Some("stray output")"#,
+                r#"tool: Agent [Survey tests] Some("Three tests.")"#,
+                r#"tool: Skill [review] Some("Launching skill: review")"#,
+                r#"tool: AskUserQuestion [Which module first?] Some("User answered: parser")"#,
+                r#"tool: plugin_x__server.search [{"query":"parser","limit":5}] Some("parser.rs")"#,
+                "report compaction: This session is being continued from a previous conversation that ran out of context.\n\nSummary:\n1. The user asked to check the repo.",
+                "assistant: Continuing with the parser.",
+            ]
+        );
+        assert!(s.unhandled.is_empty(), "{:?}", s.unhandled);
+    }
+
+    #[test]
+    fn known_fixtures_tally_nothing() {
+        for name in [
+            "basic.jsonl",
+            "tool_edges.jsonl",
+            "local_command.jsonl",
+            "command_title.jsonl",
+            "agent_reports.jsonl",
+            "attachments.jsonl",
+            "modern.jsonl",
+        ] {
+            let s = session(name);
+            assert!(s.unhandled.is_empty(), "{name}: {:?}", s.unhandled);
+        }
+    }
+
+    #[test]
+    fn basic_snapshot() {
+        insta::assert_debug_snapshot!("basic", session("basic.jsonl"));
+    }
+
+    #[test]
+    fn modern_snapshot() {
+        insta::assert_debug_snapshot!("modern", session("modern.jsonl"));
+    }
 }
