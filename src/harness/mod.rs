@@ -214,6 +214,32 @@ mod tests {
         assert_eq!(detect(&r), Detected::Unknown);
     }
 
+    #[test]
+    fn fixtures_detect_as_their_harness() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures");
+        for (dir, harness) in [("claude", Harness::Claude), ("codex", Harness::Codex)] {
+            for entry in fs::read_dir(root.join(dir)).unwrap() {
+                let path = entry.unwrap().path();
+                let records = Records::parse(&fs::read_to_string(&path).unwrap());
+                let want = if path.ends_with("snapshot_only.jsonl") {
+                    Detected::Empty
+                } else {
+                    Detected::Harness(harness)
+                };
+                assert_eq!(detect(&records), want, "{}", path.display());
+            }
+        }
+    }
+
+    #[test]
+    fn fixtures_count_mid_file_malformed_lines() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures");
+        for dir in ["claude", "codex"] {
+            let text = fs::read_to_string(root.join(dir).join("malformed.jsonl")).unwrap();
+            assert_eq!(Records::parse(&text).malformed, 1, "{dir}");
+        }
+    }
+
     fn transcript(text: &str) -> tempfile::NamedTempFile {
         let mut f = tempfile::NamedTempFile::new().unwrap();
         f.write_all(text.as_bytes()).unwrap();
