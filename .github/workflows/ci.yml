@@ -22,6 +22,10 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
+      # Ubuntu's AppArmor blocks the unprivileged user namespaces that
+      # single-user Nix needs for its sandbox.
+      - run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+
       - uses: nixbuild/nix-quick-install-action@v35
         with:
           # Without fallback = false, a runner that blocks user namespaces
