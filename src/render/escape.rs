@@ -93,6 +93,7 @@ enum Segment<'a> {
 
 struct Opener {
     indent: usize,
+    width: usize,
     ch: char,
     len: usize,
 }
@@ -114,7 +115,7 @@ fn segments(text: &str) -> Vec<Segment<'_>> {
         for line in lines.by_ref() {
             fence.push('\n');
             if closes(line, &open) {
-                // A closer indented 4+ spaces past the margin would not close.
+                // A closer's indent can differ from the opener's; column 0 is always valid.
                 fence.push_str(line.trim_start_matches([' ', '\t']));
                 closed = true;
                 break;
@@ -143,15 +144,29 @@ fn opener(line: &str) -> Option<Opener> {
     }
     Some(Opener {
         indent: line.len() - body.len(),
+        width: indent_width(line),
         ch,
         len,
     })
 }
 
+/// CommonMark reads a run indented 4+ columns past the margin as content.
 fn closes(line: &str, open: &Opener) -> bool {
     let body = line.trim_start_matches([' ', '\t']);
     let len = run_len(body, open.ch);
-    len >= open.len && body[len..].trim().is_empty()
+    indent_width(line) <= open.width + 3 && len >= open.len && body[len..].trim().is_empty()
+}
+
+fn indent_width(line: &str) -> usize {
+    let mut width = 0;
+    for c in line.chars() {
+        match c {
+            ' ' => width += 1,
+            '\t' => width += 4 - width % 4,
+            _ => break,
+        }
+    }
+    width
 }
 
 /// Leading whitespace would stop a fence from being a fence at column 0.
@@ -347,13 +362,19 @@ mod tests {
     }
 
     #[test]
-    fn over_indented_closer_still_closes() {
+    fn closer_indent_follows_commonmark() {
         check(&[
             (
-                "```\ncode\n    ```\nafter <x>",
-                "```\ncode\n```\nafter &lt;x&gt;",
+                "```\ncode\n    ```\n<tag>\n```\nafter <x>",
+                "```\ncode\n    ```\n<tag>\n```\nafter &lt;x&gt;",
             ),
-            ("```\nx\n\t```\ny", "```\nx\n```\ny"),
+            (
+                "```\ncode\n    ```\nafter <x>",
+                "```\ncode\n    ```\nafter <x>\n```",
+            ),
+            ("```\nx\n\t```\ny", "```\nx\n\t```\ny\n```"),
+            ("```\nx\n   ```\ny <z>", "```\nx\n```\ny &lt;z&gt;"),
+            ("  ```\n  a\n     ```\nb", "```\na\n```\nb"),
         ]);
     }
 
