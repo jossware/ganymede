@@ -128,6 +128,7 @@ mod tests {
     fn slug_cases() {
         for (source, want) in [
             ("", ""),
+            ("  \n\t ", ""),
             ("hello world", "hello-world"),
             ("Fix the bug — now!", "fix-the-bug-now"),
             ("already-a-slug", "already-a-slug"),
@@ -169,5 +170,6 @@ mod tests {
     #[test]
     fn non_ascii_title_is_kept_with_an_empty_slug() {
         assert_eq!(title(Some("修正してください")), "修正してください");
+        assert_eq!(slug(Some("修正してください")), "");
     }
 }
