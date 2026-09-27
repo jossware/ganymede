@@ -62,6 +62,30 @@ const SUMMARY_FIELDS: &[(&str, &str)] = &[
 
 const MCP_PREFIX: &str = "mcp__";
 
+/// Labels command output that arrives with no command before it.
+const LOCAL_COMMAND: &str = "local command";
+
+/// Stdout tags first, so output reads stdout then stderr.
+const OUTPUT_TAGS: &[&str] = &[
+    "local-command-stdout",
+    "bash-stdout",
+    "local-command-stderr",
+    "bash-stderr",
+];
+
+const TEAMMATE_OPEN: &str = "<teammate-message";
+const TEAMMATE_CLOSE: &str = "</teammate-message>";
+const NOTIFICATION_OPEN: &str = "<task-notification>";
+const NOTIFICATION_CLOSE: &str = "</task-notification>";
+
+/// Teammate status pings that carry no message.
+const TEAMMATE_NOISE: &[&str] = &[
+    "idle_notification",
+    "shutdown_approved",
+    "shutdown_request",
+    "teammate_terminated",
+];
+
 pub fn is_ignored_record(record: &Value) -> bool {
     record
         .get("type")
@@ -143,6 +167,8 @@ impl Piece {
 struct Walk {
     /// Entry index of each tool call still waiting for its result.
     pending: HashMap<String, usize>,
+    /// Name and summary for the next command-output record.
+    last_command: Option<(String, String)>,
 }
 
 impl Walk {
@@ -187,10 +213,80 @@ impl Walk {
         self.user_text(&pieces, ts, session);
     }
 
+    /// Classifies by what the text starts with, so a user who types one of
+    /// these tags in prose is not misread. Commands and their output arrive
+    /// as a single string, so they are recognised on the joined raw text.
     fn user_text(&mut self, pieces: &[Piece], ts: Option<Timestamp>, session: &mut Session) {
-        let (text, title) = clean_pieces(pieces);
+        let raw = join(pieces, false);
+        let text = raw.trim();
+        if let Some((name, args)) = slash_command(text) {
+            let line = if args.is_empty() {
+                name.clone()
+            } else {
+                format!("{name} {args}")
+            };
+            push_user(session, ts, line, &args);
+            self.last_command = Some((name, args));
+            return;
+        }
+        if text.starts_with("<bash-input>")
+            && let Some(command) = inner(text, "bash-input")
+        {
+            let command = command.trim().to_string();
+            push_user(session, ts, format!("! {command}"), "");
+            self.last_command = Some(("!".into(), command));
+            return;
+        }
+        if OUTPUT_TAGS
+            .iter()
+            .any(|tag| text.starts_with(&format!("<{tag}>")))
+        {
+            let output = OUTPUT_TAGS
+                .iter()
+                .filter_map(|tag| inner(text, tag))
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .collect::<Vec<_>>()
+                .join("\n");
+            let (name, summary) = self
+                .last_command
+                .clone()
+                .unwrap_or_else(|| (LOCAL_COMMAND.into(), String::new()));
+            // Stderr is not a failure signal.
+            session.entries.push(Entry::Tool {
+                at: ts,
+                name,
+                summary,
+                output: (!output.is_empty()).then_some(output),
+                failed: false,
+            });
+            return;
+        }
+        let before = session.entries.len();
+        let mut rest = Vec::with_capacity(pieces.len());
+        for piece in pieces {
+            if !piece.typed {
+                rest.push(piece.clone());
+                continue;
+            }
+            let (reports, remaining) = agent_reports(&piece.text);
+            for (name, report) in reports {
+                session.entries.push(Entry::AgentReport {
+                    at: ts,
+                    name,
+                    text: report,
+                });
+            }
+            rest.push(Piece::typed(&remaining));
+        }
+        let (text, title) = clean_pieces(&rest);
         if !text.is_empty() {
             push_user(session, ts, text, &title);
+        }
+        // A stray output record after later conversation must not borrow a
+        // stale command's name.
+        if session.entries.len() > before {
+            self.last_command = None;
         }
     }
 
@@ -366,6 +462,101 @@ fn remove_blocks(text: &str, tag: &str) -> String {
     out
 }
 
+/// `/<name>` and trimmed args, when `text` is a slash-command record. The
+/// `<command-message>` and `<command-name>` tags come in either order.
+fn slash_command(text: &str) -> Option<(String, String)> {
+    if !(text.starts_with("<command-name>") || text.starts_with("<command-message>")) {
+        return None;
+    }
+    let name = inner(text, "command-name")?.trim();
+    let name = name.strip_prefix('/').unwrap_or(name);
+    let args = inner(text, "command-args").unwrap_or_default().trim();
+    Some((format!("/{name}"), args.to_string()))
+}
+
+/// The text between the first `<tag>` and the `</tag>` after it.
+fn inner<'a>(text: &'a str, tag: &str) -> Option<&'a str> {
+    let open = format!("<{tag}>");
+    let close = format!("</{tag}>");
+    let start = text.find(&open)? + open.len();
+    let len = text[start..].find(&close)?;
+    Some(&text[start..start + len])
+}
+
+/// Removes teammate-message and task-notification blocks from `text`,
+/// returning their reports in text order and the remaining text. An
+/// unclosed block is left in the text.
+fn agent_reports(text: &str) -> (Vec<(String, String)>, String) {
+    let mut reports = Vec::new();
+    let mut remaining = String::new();
+    let mut rest = text;
+    loop {
+        let next = [TEAMMATE_OPEN, NOTIFICATION_OPEN]
+            .into_iter()
+            .filter_map(|open| rest.find(open).map(|i| (i, open)))
+            .min();
+        let Some((start, open)) = next else { break };
+        let close = if open == TEAMMATE_OPEN {
+            TEAMMATE_CLOSE
+        } else {
+            NOTIFICATION_CLOSE
+        };
+        let Some(len) = rest[start..].find(close) else {
+            break;
+        };
+        let block = &rest[start..start + len];
+        remaining.push_str(&rest[..start]);
+        reports.extend(if open == TEAMMATE_OPEN {
+            teammate_report(block)
+        } else {
+            notification_report(block)
+        });
+        rest = &rest[start + len + close.len()..];
+    }
+    remaining.push_str(rest);
+    (reports, remaining)
+}
+
+fn teammate_report(block: &str) -> Option<(String, String)> {
+    let (header, body) = block.split_once('>')?;
+    let name = attr(header, "teammate_id")?;
+    let text = body
+        .lines()
+        .filter(|line| !line.trim().is_empty() && !is_teammate_noise(line))
+        .collect::<Vec<_>>()
+        .join("\n");
+    (!text.is_empty()).then(|| (name.to_string(), text))
+}
+
+/// Background shells and monitors notify without a `<result>`; only agents
+/// report one.
+fn notification_report(block: &str) -> Option<(String, String)> {
+    let text = inner(block, "result")?.trim();
+    if text.is_empty() {
+        return None;
+    }
+    let summary = inner(block, "summary").unwrap_or_default();
+    let name = summary
+        .split_once("Agent \"")
+        .and_then(|(_, rest)| rest.split_once('"'))
+        .map_or("agent", |(name, _)| name);
+    Some((name.to_string(), text.to_string()))
+}
+
+fn attr<'a>(header: &'a str, name: &str) -> Option<&'a str> {
+    let key = format!(" {name}=\"");
+    let start = header.find(&key)? + key.len();
+    let len = header[start..].find('"')?;
+    Some(&header[start..start + len])
+}
+
+fn is_teammate_noise(line: &str) -> bool {
+    let line = line.trim();
+    line.starts_with('{')
+        && serde_json::from_str::<Value>(line)
+            .is_ok_and(|v| str_at(&v, "type").is_some_and(|t| TEAMMATE_NOISE.contains(&t)))
+}
+
 fn flag(v: &Value, key: &str) -> bool {
     at(v, key).and_then(Value::as_bool) == Some(true)
 }
@@ -476,6 +667,249 @@ mod tests {
                 Entry::AgentReport { name, text, .. } => format!("report {name}: {text}"),
             })
             .collect()
+    }
+
+    #[test]
+    fn slash_commands_are_user_turns_with_tool_output() {
+        let s = session("local_command.jsonl");
+        assert_eq!(
+            lines(&s),
+            [
+                "user: /model fable",
+                r#"tool: /model [fable] Some("Set model to Fable 5.1")"#,
+                "user: /doctor",
+                r#"tool: /doctor [] Some("doctor: config file not found")"#,
+                "user: Now explain the build error",
+                "assistant: The build fails because `main` is missing a semicolon.",
+            ]
+        );
+        assert_eq!(s.title_source.as_deref(), Some("fable"));
+    }
+
+    #[test]
+    fn command_args_title_the_session() {
+        let s = session("command_title.jsonl");
+        assert!(!s.is_empty());
+        assert_eq!(
+            lines(&s),
+            [
+                "user: /brainstorm Design the export format",
+                "assistant: What should the export contain?",
+            ]
+        );
+        assert_eq!(s.title_source.as_deref(), Some("Design the export format"));
+    }
+
+    #[test]
+    fn command_tags_in_either_order() {
+        for input in [
+            "<command-name>/review</command-name>\n<command-message>review</command-message>\n<command-args> src </command-args>",
+            "<command-message>review</command-message>\n<command-name>review</command-name>\n<command-args>src</command-args>",
+        ] {
+            assert_eq!(
+                lines(&parse_all(&[user(json!(input))])),
+                ["user: /review src"],
+                "{input}"
+            );
+        }
+    }
+
+    #[test]
+    fn command_record_is_the_command() {
+        let s = parse_all(&[user(json!(
+            "<command-name>foo</command-name>actual message"
+        ))]);
+        assert_eq!(lines(&s), ["user: /foo"]);
+    }
+
+    #[test]
+    fn command_tags_count_only_at_the_start() {
+        let s = parse_all(&[
+            user(json!("<command-args>some args</command-args>")),
+            user(json!(
+                "<command-message>foo</command-message>actual message"
+            )),
+            user(json!("<command-name>unclosed")),
+            user(json!("How do I parse <command-name> tags?")),
+        ]);
+        assert_eq!(
+            lines(&s),
+            [
+                "user: <command-args>some args</command-args>",
+                "user: actual message",
+                "user: <command-name>unclosed",
+                "user: How do I parse <command-name> tags?",
+            ]
+        );
+    }
+
+    #[test]
+    fn command_output_without_a_command() {
+        let s = parse_all(&[
+            user(json!(
+                "<local-command-stdout>output here</local-command-stdout>"
+            )),
+            user(json!(
+                "<local-command-stderr>error output</local-command-stderr>"
+            )),
+        ]);
+        assert_eq!(
+            lines(&s),
+            [
+                r#"tool: local command [] Some("output here")"#,
+                r#"tool: local command [] Some("error output")"#,
+            ]
+        );
+    }
+
+    #[test]
+    fn stdout_then_stderr() {
+        let s = parse_all(&[
+            user(json!(
+                "<command-name>/doctor</command-name><command-args></command-args>"
+            )),
+            user(json!(
+                "<local-command-stdout> ok </local-command-stdout><local-command-stderr>warn</local-command-stderr>"
+            )),
+        ]);
+        assert_eq!(lines(&s)[1], r#"tool: /doctor [] Some("ok\nwarn")"#);
+    }
+
+    #[test]
+    fn shell_mode_input_and_output() {
+        let s = parse_all(&[
+            user(json!("<bash-input>ls -a</bash-input>")),
+            user(json!(
+                "<bash-stdout>Cargo.toml</bash-stdout><bash-stderr></bash-stderr>"
+            )),
+            user(json!("<bash-input>false</bash-input>")),
+            user(json!(
+                "<bash-stdout></bash-stdout><bash-stderr>  </bash-stderr>"
+            )),
+        ]);
+        assert_eq!(
+            lines(&s),
+            [
+                "user: ! ls -a",
+                r#"tool: ! [ls -a] Some("Cargo.toml")"#,
+                "user: ! false",
+                "tool: ! [false] None",
+            ]
+        );
+    }
+
+    #[test]
+    fn conversation_forgets_the_last_command() {
+        let s = parse_all(&[
+            user(json!(
+                "<command-name>/model</command-name><command-args>fable</command-args>"
+            )),
+            user(json!("Thanks")),
+            user(json!("<local-command-stdout>late</local-command-stdout>")),
+        ]);
+        assert_eq!(lines(&s)[2], r#"tool: local command [] Some("late")"#);
+    }
+
+    #[test]
+    fn teammate_message_is_a_report() {
+        let s = parse_all(&[user(json!(
+            "<teammate-message teammate_id=\"researcher\" summary=\"Found the issue\">\nI found the bug in line 42 of app.ts.\nThe variable is undefined.\n</teammate-message>"
+        ))]);
+        assert_eq!(
+            lines(&s),
+            [
+                "report researcher: I found the bug in line 42 of app.ts.\nThe variable is undefined."
+            ]
+        );
+    }
+
+    #[test]
+    fn teammate_noise_is_filtered() {
+        for (body, want) in [
+            (
+                "Working on the task.\n{\"type\":\"idle_notification\",\"idle_since\":\"2025-01-01\"}\nAlmost done.",
+                vec!["report worker: Working on the task.\nAlmost done."],
+            ),
+            (
+                "{\"type\":\"shutdown_request\",\"requestId\":\"abc-123\"}\n{\"type\":\"shutdown_approved\",\"requestId\":\"abc-123\"}\n{\"type\":\"teammate_terminated\",\"teammate_id\":\"helper\"}\nGoodbye!",
+                vec!["report worker: Goodbye!"],
+            ),
+            (
+                "{\"type\":\"idle_notification\",\"idle_since\":\"2025-01-01\"}\n{\"type\":\"shutdown_approved\",\"requestId\":\"abc-123\"}",
+                vec![],
+            ),
+        ] {
+            let message = format!(
+                "<teammate-message teammate_id=\"worker\" summary=\"Status\">\n{body}\n</teammate-message>"
+            );
+            assert_eq!(lines(&parse_all(&[user(json!(message))])), want, "{body}");
+        }
+    }
+
+    #[test]
+    fn prose_mentioning_a_tag_name_is_user_text() {
+        let s = parse_all(&[user(json!("Fix the bug in teammate-message handler"))]);
+        assert_eq!(lines(&s), ["user: Fix the bug in teammate-message handler"]);
+    }
+
+    #[test]
+    fn agent_reports_fixture() {
+        let s = session("agent_reports.jsonl");
+        assert_eq!(
+            lines(&s),
+            [
+                "user: Survey the parser module in the background",
+                r#"tool: Agent [Survey parser] Some("Async agent launched successfully.\nagentId: a1b2c3d4e5f6a7b8c")"#,
+                "report Survey parser: parser.rs exposes `parse` and `Record`.",
+                "report researcher: The bug is in the tokenizer.",
+                "user: Thanks, please fix it",
+                "assistant: Fixing the tokenizer.",
+            ]
+        );
+        assert!(s.unhandled.is_empty(), "{:?}", s.unhandled);
+    }
+
+    #[test]
+    fn reports_keep_text_order() {
+        let message = "<task-notification>\n<summary>Monitor event: \"CI\"</summary>\n<event>done</event>\n</task-notification>\n\
+            <task-notification>\n<summary>Agent \"Late\" completed</summary>\n<result>late result</result>\n</task-notification>\n\
+            <teammate-message teammate_id=\"a\">\nfrom a\n</teammate-message>\n\
+            <task-notification>\n<summary>no agent name</summary>\n<result>anon</result>\n</task-notification>\n\
+            <teammate-message missing=\"id\">\nx\n</teammate-message>\ntrailing words";
+        let s = parse_all(&[user(json!(message))]);
+        assert_eq!(
+            lines(&s),
+            [
+                "report Late: late result",
+                "report a: from a",
+                "report agent: anon",
+                "user: trailing words",
+            ]
+        );
+    }
+
+    #[test]
+    fn title_source_skips_agent_reports() {
+        let s = parse_all(&[user(json!([
+            {"type": "image", "source": {}},
+            text("<teammate-message teammate_id=\"a\">\nreport\n</teammate-message>Please look"),
+        ]))]);
+        assert_eq!(
+            lines(&s),
+            ["report a: report", "user: [image]\n\nPlease look"]
+        );
+        assert_eq!(s.title_source.as_deref(), Some("Please look"));
+    }
+
+    #[test]
+    fn unclosed_report_stays_as_text() {
+        let s = parse_all(&[user(json!(
+            "<teammate-message teammate_id=\"a\">\nnever closed"
+        ))]);
+        assert_eq!(
+            lines(&s),
+            ["user: <teammate-message teammate_id=\"a\">\nnever closed"]
+        );
     }
 
     // cc2md: ExtractMetadata_BasicFields
