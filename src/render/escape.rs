@@ -37,7 +37,7 @@ pub fn blocks(text: &str) -> Vec<Block> {
 }
 
 pub fn fence_for(content: &str) -> String {
-    "`".repeat(longest_backticks(content).max(2) + 1)
+    "`".repeat(longest_run(content, '`').max(2) + 1)
 }
 
 pub fn code_span(text: &str) -> String {
@@ -46,7 +46,7 @@ pub fn code_span(text: &str) -> String {
         return String::new();
     }
     let body = truncate(&collapsed, MAX_SUMMARY_LEN);
-    let delimiter = "`".repeat(longest_backticks(&body) + 1);
+    let delimiter = "`".repeat(longest_run(&body, '`') + 1);
     // A span that starts or ends with a backtick would merge with the delimiter.
     let pad = if body.starts_with('`') || body.ends_with('`') {
         " "
@@ -78,8 +78,8 @@ fn truncate(s: &str, max: usize) -> String {
     format!("{}...", &s[..cut])
 }
 
-fn longest_backticks(s: &str) -> usize {
-    s.split(|c| c != '`').map(str::len).max().unwrap_or(0)
+fn longest_run(s: &str, ch: char) -> usize {
+    s.split(|c| c != ch).map(str::len).max().unwrap_or(0)
 }
 
 /// Rust's `trim` also strips Unicode spaces such as NBSP, which CommonMark
@@ -118,23 +118,14 @@ fn segments(text: &str) -> Vec<Segment<'_>> {
         if !prose.is_empty() {
             out.push(Segment::Prose(std::mem::take(&mut prose)));
         }
-        let mut fence = dedent(line, open.indent).to_string();
-        let mut closed = false;
+        let mut body = Vec::new();
         for line in lines.by_ref() {
-            fence.push('\n');
             if closes(line, &open) {
-                // A closer's indent can differ from the opener's; column 0 is always valid.
-                fence.push_str(line.trim_start_matches([' ', '\t']));
-                closed = true;
                 break;
             }
-            fence.push_str(dedent(line, open.indent));
+            body.push(dedent(line, open.indent));
         }
-        if !closed {
-            fence.push('\n');
-            fence.extend(std::iter::repeat_n(open.ch, open.len));
-        }
-        out.push(Segment::Fence(fence));
+        out.push(Segment::Fence(fence(line, &open, &body)));
     }
     if !prose.is_empty() {
         out.push(Segment::Prose(prose));
@@ -156,6 +147,26 @@ fn opener(line: &str) -> Option<Opener> {
         ch,
         len,
     })
+}
+
+/// The delimiter is rebuilt longer than any run in the content, so no content
+/// line can close it, however dedenting shifts it.
+fn fence(opener: &str, open: &Opener, body: &[&str]) -> String {
+    let info = &opener.trim_start_matches([' ', '\t'])[open.len..];
+    let longest = body
+        .iter()
+        .map(|l| longest_run(l, open.ch))
+        .max()
+        .unwrap_or(0);
+    let run = open.ch.to_string().repeat(open.len.max(longest + 1));
+    let mut out = format!("{run}{info}");
+    for line in body {
+        out.push('\n');
+        out.push_str(line);
+    }
+    out.push('\n');
+    out.push_str(&run);
+    out
 }
 
 /// CommonMark reads a run indented 4+ columns past the margin as content.
@@ -365,7 +376,7 @@ mod tests {
                 "text\n```rust\nfn main() {}\n```",
             ),
             ("~~~~\nx", "~~~~\nx\n~~~~"),
-            ("```\r\n<a>\r\n```\r\nb", "```\r\n<a>\r\n```\r\nb"),
+            ("```\r\n<a>\r\n```\r\nb", "```\r\n<a>\r\n```\nb"),
         ]);
     }
 
@@ -374,16 +385,24 @@ mod tests {
         check(&[
             (
                 "```\ncode\n    ```\n<tag>\n```\nafter <x>",
-                "```\ncode\n    ```\n<tag>\n```\nafter &lt;x&gt;",
+                "````\ncode\n    ```\n<tag>\n````\nafter &lt;x&gt;",
             ),
             (
                 "```\ncode\n    ```\nafter <x>",
-                "```\ncode\n    ```\nafter <x>\n```",
+                "````\ncode\n    ```\nafter <x>\n````",
             ),
-            ("```\nx\n\t```\ny", "```\nx\n\t```\ny\n```"),
+            ("```\nx\n\t```\ny", "````\nx\n\t```\ny\n````"),
             ("```\nx\n   ```\ny <z>", "```\nx\n```\ny &lt;z&gt;"),
             ("  ```\n  a\n     ```\nb", "```\na\n```\nb"),
         ]);
+    }
+
+    #[test]
+    fn content_cannot_close_the_emitted_fence() {
+        check(&[(
+            " \t```\ncode\n\t    ```\n<script>x</script>\n \t```\nafter <x>",
+            "````\ncode\n   ```\n<script>x</script>\n````\nafter &lt;x&gt;",
+        )]);
     }
 
     #[test]
@@ -391,7 +410,7 @@ mod tests {
         check(&[
             (
                 "```\nx\n```\u{a0}\n<t>\n```\nafter <x>",
-                "```\nx\n```\u{a0}\n<t>\n```\nafter &lt;x&gt;",
+                "````\nx\n```\u{a0}\n<t>\n````\nafter &lt;x&gt;",
             ),
             ("a\n---\u{a0}", "a\n---\u{a0}"),
             ("\u{a0}\n---", "\u{a0}\n<hr>"),
@@ -552,7 +571,7 @@ mod tests {
     fn crlf_prose_is_escaped() {
         check(&[(
             "```\r\n<a>\r\n```\r\nb <x>",
-            "```\r\n<a>\r\n```\r\nb &lt;x&gt;",
+            "```\r\n<a>\r\n```\nb &lt;x&gt;",
         )]);
     }
 
