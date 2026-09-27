@@ -139,10 +139,6 @@ pub fn parse(records: &Records, session: &mut Session) -> Result<(), LoadError> 
     if items == 0 && str_at(meta, "originator") == Some(LEGACY_ORIGINATOR) {
         return Err(LoadError::Parse("unsupported codex rollout format".into()));
     }
-    session.title_source = session.entries.iter().find_map(|e| match e {
-        Entry::User { text, .. } => Some(title_source(text)),
-        _ => None,
-    });
     Ok(())
 }
 
@@ -380,18 +376,34 @@ fn hex(b: u8) -> Option<u8> {
 
 fn user_message(item: &Value, ts: Option<Timestamp>, session: &mut Session) -> Option<Entry> {
     let mut parts = Vec::new();
+    let mut texts = Vec::new();
     for block in array_at(item, "content") {
         match str_at(block, "type").unwrap_or_default() {
-            "text" => parts.push(clean_user_text(str_at(block, "text").unwrap_or_default())),
+            "text" => {
+                let text = clean_user_text(str_at(block, "text").unwrap_or_default());
+                if !text.is_empty() {
+                    texts.push(text.clone());
+                    parts.push(text);
+                }
+            }
             "image" => parts.push("[image]".to_string()),
             t => session.record_unhandled(&format!("block/{t}"), 1),
         }
     }
-    parts.retain(|p| !p.is_empty());
-    (!parts.is_empty()).then(|| Entry::User {
-        at: ts,
-        text: parts.join("\n\n"),
-    })
+    if parts.is_empty() {
+        return None;
+    }
+    let text = parts.join("\n\n");
+    if session.title_source.is_none() {
+        // A screenshot opener is titled by what the user asked.
+        let source = if texts.is_empty() {
+            text.clone()
+        } else {
+            texts.join("\n\n")
+        };
+        session.title_source = Some(title_source(&source));
+    }
+    Some(Entry::User { at: ts, text })
 }
 
 fn agent_message(item: &Value, ts: Option<Timestamp>, session: &mut Session) -> Option<Entry> {
@@ -636,8 +648,29 @@ mod tests {
         );
         assert_eq!(
             s.title_source.as_deref(),
-            Some("Why is the header misaligned?\n\n[image]")
+            Some("Why is the header misaligned?")
         );
+    }
+
+    #[test]
+    fn image_only_opener_titles_by_placeholder() {
+        let s = parse_str(concat!(
+            r#"{"type":"session_meta","payload":{"id":"a","source":"cli"}}"#, "\n",
+            r#"{"type":"event_msg","payload":{"type":"item_completed","item":{"type":"UserMessage","content":[{"type":"image"}]}}}"#,
+        ))
+        .unwrap();
+        assert_eq!(s.title_source.as_deref(), Some("[image]"));
+    }
+
+    #[test]
+    fn typed_placeholder_text_is_kept_in_title_source() {
+        let s = parse_str(concat!(
+            r#"{"type":"session_meta","payload":{"id":"a","source":"cli"}}"#, "\n",
+            r#"{"type":"event_msg","payload":{"type":"item_completed","item":{"type":"UserMessage","content":[{"type":"image"},{"type":"text","text":"$code-review what does [image] mean"}]}}}"#,
+        ))
+        .unwrap();
+        assert_eq!(users(&s), ["[image]\n\n$code-review what does [image] mean"]);
+        assert_eq!(s.title_source.as_deref(), Some("what does [image] mean"));
     }
 
     #[test]
