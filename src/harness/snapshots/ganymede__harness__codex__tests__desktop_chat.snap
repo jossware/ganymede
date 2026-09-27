@@ -18,7 +18,7 @@ Session {
         2026-09-15T19:42:00Z,
     ),
     title_source: Some(
-        "Why is the header misaligned?\n\n[image]",
+        "Why is the header misaligned?",
     ),
     cc_version: None,
     entries: [
