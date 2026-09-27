@@ -48,7 +48,6 @@ const SHELLS: &[&str] = &["sh", "bash", "zsh", "dash", "ksh", "fish"];
 const APPS_SERVER: &str = "codex_apps";
 
 const REQUEST_MARKER: &str = "## My request:";
-const FILES_HEADING: &str = "# Files mentioned by the user:";
 const BROWSER_OPEN: &str = "<in-app-browser-context";
 const BROWSER_CLOSE: &str = "</in-app-browser-context>";
 const REPLY_OPEN: &str = "<send_user_message_question_reply>";
@@ -153,7 +152,7 @@ fn map_item(item: &Value, ts: Option<Timestamp>, turn_cwd: Option<&Path>, sessio
         "AgentMessage" => agent_message(item, ts, session),
         "CommandExecution" => Some(command_execution(item, ts)),
         "FileChange" => Some(file_change(item, ts, turn_cwd)),
-        "McpToolCall" => Some(mcp_tool_call(item, ts)),
+        "McpToolCall" => Some(mcp_tool_call(item, ts, session)),
         "Reasoning" => reasoning(item).map(|text| Entry::Thinking { at: ts, text }),
         "WebSearch" => Some(web_search(item, ts)),
         "ImageView" => {
@@ -277,7 +276,7 @@ fn relative(path: &str, cwd: Option<&Path>) -> String {
         .map_or_else(|| path.to_string(), |p| p.display().to_string())
 }
 
-fn mcp_tool_call(item: &Value, ts: Option<Timestamp>) -> Entry {
+fn mcp_tool_call(item: &Value, ts: Option<Timestamp>, session: &mut Session) -> Entry {
     let server = str_at(item, "server").unwrap_or_default();
     let name = str_at(item, "tool").unwrap_or_default();
     let name = if server.is_empty() || server == APPS_SERVER {
@@ -289,11 +288,15 @@ fn mcp_tool_call(item: &Value, ts: Option<Timestamp>) -> Entry {
         .filter(|a| !a.is_null())
         .map(Value::to_string)
         .unwrap_or_default();
-    let output = array_at(item, "result.content")
-        .iter()
-        .filter_map(|b| str_at(b, "text"))
-        .collect::<Vec<_>>()
-        .join("\n");
+    let mut parts = Vec::new();
+    for block in array_at(item, "result.content") {
+        match str_at(block, "type").unwrap_or_default() {
+            "text" => parts.push(str_at(block, "text").unwrap_or_default()),
+            "image" => parts.push("[image]"),
+            t => session.record_unhandled(&format!("block/{t}"), 1),
+        }
+    }
+    let output = parts.join("\n");
     let is_error = at(item, "result.isError").and_then(Value::as_bool) == Some(true);
     tool(item, ts, name, summary, output, is_error)
 }
@@ -422,12 +425,12 @@ fn clean_user_text(text: &str) -> String {
         return answers;
     }
     // Desktop wraps the request in attachments and UI state, then marks it.
+    // Without the marker, an attachment list cannot be told apart from the
+    // user's own Markdown, so it is kept.
     if let Some(request) = after_request_marker(text) {
         return request.trim().to_string();
     }
-    strip_files_section(&strip_browser_context(text))
-        .trim()
-        .to_string()
+    strip_browser_context(text).trim().to_string()
 }
 
 /// Desktop sends answers to the agent's questions as JSON with internal ids;
@@ -465,39 +468,6 @@ fn strip_browser_context(text: &str) -> String {
     }
     out.push_str(rest);
     out
-}
-
-/// The section runs to the first blank line followed by a non-entry line.
-/// Without that boundary the section cannot be told apart from a request
-/// that looks like an entry, so nothing is stripped rather than everything.
-fn strip_files_section(text: &str) -> String {
-    let lines: Vec<&str> = text.lines().collect();
-    let Some(start) = lines.iter().position(|l| l.trim() == FILES_HEADING) else {
-        return text.to_string();
-    };
-    let Some(end) = (start + 1..lines.len()).find(|&i| {
-        lines[i].trim().is_empty()
-            && lines
-                .get(i + 1)
-                .is_some_and(|next| !next.trim().is_empty() && !is_file_entry(next))
-    }) else {
-        return text.to_string();
-    };
-    lines[..start]
-        .iter()
-        .chain(&lines[end..])
-        .copied()
-        .collect::<Vec<_>>()
-        .join("\n")
-}
-
-/// Attachments are listed as `## <name>: <absolute path>`. Users write
-/// `## Heading: words` too, so the path is what marks an entry.
-fn is_file_entry(line: &str) -> bool {
-    line.trim_start()
-        .strip_prefix("## ")
-        .and_then(|rest| rest.rsplit_once(": "))
-        .is_some_and(|(_, path)| path.starts_with('/'))
 }
 
 /// A `$skill` invocation is titled by its arguments when it has any.
@@ -818,30 +788,17 @@ mod tests {
     }
 
     #[test]
-    fn clean_strips_files_section_without_marker() {
-        let text = "\n# Files mentioned by the user:\n\n## notes.md: /x/notes.md\n\n## b.md: /x/b.md\n\nSummarise these\n";
-        assert_eq!(clean_user_text(text), "Summarise these");
-    }
-
-    #[test]
-    fn clean_keeps_markdown_request_after_files_section() {
+    fn clean_keeps_files_list_without_marker() {
         for request in [
+            "Summarise these",
             "# Review these files",
-            "- Summarise the risks",
-            "## Plan",
             "## Review: security risks",
+            "## Endpoint: /api/users\n\nExplain the auth flow",
         ] {
             let text =
                 format!("\n# Files mentioned by the user:\n\n## a.md: /x/a.md\n\n{request}\n");
-            assert_eq!(clean_user_text(&text), request);
+            assert_eq!(clean_user_text(&text), text.trim());
         }
-    }
-
-    #[test]
-    fn clean_keeps_everything_when_files_section_has_no_end() {
-        let text =
-            "\n# Files mentioned by the user:\n\n## a.md: /x/a.md\n\n## Endpoint: /api/users\n";
-        assert_eq!(clean_user_text(text), text.trim());
     }
 
     #[test]
@@ -977,6 +934,26 @@ mod tests {
     }
 
     #[test]
+    fn mcp_non_text_results_are_marked_or_tallied() {
+        let s = map_one(json!({
+            "type": "McpToolCall", "server": "shots", "tool": "capture", "status": "completed",
+            "result": {"content": [
+                {"type": "image", "data": "iVBORw0KGgo=", "mimeType": "image/png"},
+                {"type": "resource", "resource": {"uri": "file:///x.txt"}},
+                {"type": "text", "text": "saved"},
+            ]},
+        }));
+        assert_eq!(
+            tools(&s),
+            [("shots.capture", "", Some("[image]\nsaved"), false)]
+        );
+        assert_eq!(
+            s.unhandled,
+            BTreeMap::from([("codex:block/resource".to_string(), 1)])
+        );
+    }
+
+    #[test]
     fn apps_server_is_dropped_from_mcp_names() {
         let s = map_one(json!({
             "type": "McpToolCall", "server": "codex_apps", "tool": "github.fetch_file",
@@ -1108,7 +1085,13 @@ mod tests {
     #[test]
     fn edge_items() {
         let s = session("edges.jsonl");
-        assert_eq!(users(&s), ["Summarise the attached notes", "Every page"]);
+        assert_eq!(
+            users(&s),
+            [
+                "# Files mentioned by the user:\n\n## notes.md: /Users/user/Workspaces/sample/notes.md\n\nSummarise the attached notes",
+                "Every page",
+            ]
+        );
         assert_eq!(thinking(&s), ["Raw chain of thought"]);
         assert_eq!(
             tools(&s),
