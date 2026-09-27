@@ -90,7 +90,7 @@ Session {
             name: "Edit",
             summary: "update README.md",
             output: Some(
-                "README.md:\n@@ -1 +1 @@\n",
+                "README.md:\n@@ -1 +1 @@\npatch rejected",
             ),
             failed: true,
         },

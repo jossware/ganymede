@@ -248,8 +248,14 @@ fn file_change(item: &Value, ts: Option<Timestamp>, turn_cwd: Option<&Path>) -> 
             }
         }
     }
+    // The failure reason has been seen in either stream.
     if str_at(item, "status") == Some("failed") {
-        output.push_str(str_at(item, "stderr").unwrap_or_default());
+        let reasons: Vec<&str> = ["stderr", "stdout"]
+            .iter()
+            .filter_map(|k| str_at(item, k))
+            .filter(|s| !s.is_empty())
+            .collect();
+        output.push_str(&reasons.join("\n"));
     }
     tool(item, ts, "Edit".into(), summary.join(", "), output, false)
 }
@@ -472,8 +478,12 @@ fn strip_files_section(text: &str) -> String {
         .join("\n")
 }
 
+/// Attachments are listed as `## <name>: <path>`. Any other line, even one
+/// starting with Markdown, is the user's own text.
 fn is_file_entry(line: &str) -> bool {
-    line.trim_start().starts_with(['-', '*', '#'])
+    line.trim_start()
+        .strip_prefix("## ")
+        .is_some_and(|rest| rest.contains(": "))
 }
 
 /// A `$skill` invocation is titled by its arguments when it has any.
@@ -795,8 +805,17 @@ mod tests {
 
     #[test]
     fn clean_strips_files_section_without_marker() {
-        let text = "\n# Files mentioned by the user:\n\n## notes.md: /x/notes.md\n\n- /x/b.md\n\nSummarise these\n";
+        let text = "\n# Files mentioned by the user:\n\n## notes.md: /x/notes.md\n\n## b.md: /x/b.md\n\nSummarise these\n";
         assert_eq!(clean_user_text(text), "Summarise these");
+    }
+
+    #[test]
+    fn clean_keeps_markdown_request_after_files_section() {
+        for request in ["# Review these files", "- Summarise the risks", "## Plan"] {
+            let text =
+                format!("\n# Files mentioned by the user:\n\n## a.md: /x/a.md\n\n{request}\n");
+            assert_eq!(clean_user_text(&text), request);
+        }
     }
 
     #[test]
@@ -874,7 +893,7 @@ mod tests {
                 (
                     "Edit",
                     "update README.md",
-                    Some("README.md:\n@@ -1 +1 @@\n"),
+                    Some("README.md:\n@@ -1 +1 @@\npatch rejected"),
                     true
                 ),
                 (
@@ -945,6 +964,7 @@ mod tests {
     fn failed_file_change_appends_stderr() {
         let s = map_one(json!({
             "type": "FileChange", "status": "failed", "stderr": "no parent dir",
+            "stdout": "aborted",
             "changes": {"/a/b.rs": {"type": "add", "content": "x\n"}},
         }));
         assert_eq!(
@@ -952,7 +972,7 @@ mod tests {
             [(
                 "Edit",
                 "add /a/b.rs",
-                Some("/a/b.rs:\nx\nno parent dir"),
+                Some("/a/b.rs:\nx\nno parent dir\naborted"),
                 true
             )]
         );
