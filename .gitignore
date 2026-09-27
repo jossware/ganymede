@@ -10,3 +10,4 @@
 # Rust / Nix
 /target
 /result
+/.direnv
