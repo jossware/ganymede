@@ -1,4 +1,9 @@
 mod cli;
+// Unused until the renderer and archive consume the model.
+#[allow(dead_code)]
+mod harness;
+#[allow(dead_code)]
+mod session;
 
 use std::process::ExitCode;
 

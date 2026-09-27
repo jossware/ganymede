@@ -1,6 +1,8 @@
 use std::path::PathBuf;
 
-use clap::{ArgAction, Args, Parser, Subcommand, ValueEnum};
+use clap::{ArgAction, Args, Parser, Subcommand};
+
+use crate::harness::Harness;
 
 #[derive(Debug, Parser)]
 #[command(version, about)]
@@ -39,19 +41,13 @@ pub struct RenderOpts {
     pub dir: Option<PathBuf>,
     /// Transcript format; detected when omitted.
     #[arg(long, value_enum)]
-    pub harness: Option<HarnessArg>,
+    pub harness: Option<Harness>,
     #[arg(long, default_value_t = true, action = ArgAction::Set)]
     pub thinking: bool,
     #[arg(long, default_value_t = true, action = ArgAction::Set)]
     pub tool_output: bool,
     #[arg(long, default_value_t = 100)]
     pub max_lines: usize,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
-pub enum HarnessArg {
-    Claude,
-    Codex,
 }
 
 #[cfg(test)]
