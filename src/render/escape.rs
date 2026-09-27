@@ -82,6 +82,14 @@ fn longest_backticks(s: &str) -> usize {
     s.split(|c| c != '`').map(str::len).max().unwrap_or(0)
 }
 
+/// Rust's `trim` also strips Unicode spaces such as NBSP, which CommonMark
+/// treats as text.
+const MD_SPACE: [char; 3] = [' ', '\t', '\r'];
+
+fn is_blank(s: &str) -> bool {
+    s.trim_matches(MD_SPACE).is_empty()
+}
+
 fn run_len(s: &str, ch: char) -> usize {
     s.len() - s.trim_start_matches(ch).len()
 }
@@ -154,7 +162,7 @@ fn opener(line: &str) -> Option<Opener> {
 fn closes(line: &str, open: &Opener) -> bool {
     let body = line.trim_start_matches([' ', '\t']);
     let len = run_len(body, open.ch);
-    indent_width(line) <= open.width + 3 && len >= open.len && body[len..].trim().is_empty()
+    indent_width(line) <= open.width + 3 && len >= open.len && is_blank(&body[len..])
 }
 
 fn indent_width(line: &str) -> usize {
@@ -178,11 +186,11 @@ fn dedent(line: &str, indent: usize) -> &str {
 fn trim_blank<'a>(lines: &'a [&'a str]) -> &'a [&'a str] {
     let start = lines
         .iter()
-        .position(|l| !l.trim().is_empty())
+        .position(|l| !is_blank(l))
         .unwrap_or(lines.len());
     let end = lines
         .iter()
-        .rposition(|l| !l.trim().is_empty())
+        .rposition(|l| !is_blank(l))
         .map_or(start, |i| i + 1);
     &lines[start..end]
 }
@@ -195,7 +203,7 @@ fn prose(lines: &[&str]) -> String {
         if i > 0 {
             out.push('\n');
         }
-        if i > 0 && !lines[i - 1].trim().is_empty() && is_underline(line) {
+        if i > 0 && !is_blank(lines[i - 1]) && is_underline(line) {
             out.push_str(&underline(line));
         } else {
             inline(line, &mut out);
@@ -206,14 +214,14 @@ fn prose(lines: &[&str]) -> String {
 
 fn is_underline(line: &str) -> bool {
     let body = line.trim_start_matches(' ');
-    let run = body.trim_end();
+    let run = body.trim_end_matches(MD_SPACE);
     line.len() - body.len() <= 3
         && !run.is_empty()
         && (run.bytes().all(|b| b == b'-') || run.bytes().all(|b| b == b'='))
 }
 
 fn underline(line: &str) -> String {
-    let run = line.trim();
+    let run = line.trim_matches(MD_SPACE);
     if run.len() >= 3 && run.starts_with('-') {
         "<hr>".to_string()
     } else {
@@ -375,6 +383,18 @@ mod tests {
             ("```\nx\n\t```\ny", "```\nx\n\t```\ny\n```"),
             ("```\nx\n   ```\ny <z>", "```\nx\n```\ny &lt;z&gt;"),
             ("  ```\n  a\n     ```\nb", "```\na\n```\nb"),
+        ]);
+    }
+
+    #[test]
+    fn only_commonmark_whitespace_is_blank() {
+        check(&[
+            (
+                "```\nx\n```\u{a0}\n<t>\n```\nafter <x>",
+                "```\nx\n```\u{a0}\n<t>\n```\nafter &lt;x&gt;",
+            ),
+            ("a\n---\u{a0}", "a\n---\u{a0}"),
+            ("\u{a0}\n---", "\u{a0}\n<hr>"),
         ]);
     }
 
