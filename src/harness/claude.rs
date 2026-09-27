@@ -1,5 +1,6 @@
 use jiff::Timestamp;
 use serde_json::Value;
+use std::collections::HashMap;
 
 use super::json::{array_at, at, str_at, timestamp_at};
 use super::{LoadError, Records};
@@ -37,6 +38,29 @@ const COMPACTION: &str = "compaction";
 
 /// Tags Claude Code injects into user messages; the user never typed them.
 const INJECTED_TAGS: &[&str] = &["system-reminder", "local-command-caveat", "command-message"];
+
+/// The input field that names what each tool acts on. `Task` is the old name
+/// for `Agent`.
+const SUMMARY_FIELDS: &[(&str, &str)] = &[
+    ("Bash", "command"),
+    ("Read", "file_path"),
+    ("Write", "file_path"),
+    ("Edit", "file_path"),
+    ("NotebookEdit", "notebook_path"),
+    ("Glob", "pattern"),
+    ("Grep", "pattern"),
+    ("WebSearch", "query"),
+    ("ToolSearch", "query"),
+    ("WebFetch", "url"),
+    ("Agent", "description"),
+    ("Task", "description"),
+    ("Skill", "skill"),
+    ("TaskCreate", "subject"),
+    ("TaskUpdate", "taskId"),
+    ("SendMessage", "to"),
+];
+
+const MCP_PREFIX: &str = "mcp__";
 
 pub fn is_ignored_record(record: &Value) -> bool {
     record
@@ -116,7 +140,10 @@ impl Piece {
 }
 
 #[derive(Default)]
-struct Walk {}
+struct Walk {
+    /// Entry index of each tool call still waiting for its result.
+    pending: HashMap<String, usize>,
+}
 
 impl Walk {
     fn user(&mut self, record: &Value, session: &mut Session) {
@@ -135,6 +162,7 @@ impl Walk {
                                 None => "[document]".into(),
                             }))
                         }
+                        "tool_result" => self.tool_result(block, session),
                         t => session.record_unhandled(&format!("block/{t}"), 1),
                     }
                 }
@@ -188,8 +216,38 @@ impl Walk {
                     }
                 }
                 "redacted_thinking" => {}
+                "tool_use" => self.tool_use(block, ts, session),
                 t => session.record_unhandled(&format!("block/{t}"), 1),
             }
+        }
+    }
+
+    fn tool_use(&mut self, block: &Value, ts: Option<Timestamp>, session: &mut Session) {
+        let input = at(block, "input").unwrap_or(&Value::Null);
+        let (name, summary) = tool_label(str_at(block, "name").unwrap_or_default(), input);
+        if let Some(id) = non_empty(block, "id") {
+            self.pending.insert(id.to_string(), session.entries.len());
+        }
+        session.entries.push(Entry::Tool {
+            at: ts,
+            name,
+            summary,
+            output: None,
+            failed: false,
+        });
+    }
+
+    /// Only the first result for a pending call counts; an orphan has no name
+    /// or arguments to show.
+    fn tool_result(&mut self, block: &Value, session: &mut Session) {
+        let Some(index) = str_at(block, "tool_use_id").and_then(|id| self.pending.remove(id))
+        else {
+            return;
+        };
+        let text = result_text(block, session);
+        if let Some(Entry::Tool { output, failed, .. }) = session.entries.get_mut(index) {
+            *output = (!text.trim().is_empty()).then_some(text);
+            *failed = flag(block, "is_error");
         }
     }
 }
@@ -205,6 +263,54 @@ fn push_user(session: &mut Session, at: Option<Timestamp>, text: String, title: 
         });
     }
     session.entries.push(Entry::User { at, text });
+}
+
+fn result_text(block: &Value, session: &mut Session) -> String {
+    match at(block, "content") {
+        Some(Value::String(s)) => s.clone(),
+        Some(Value::Array(parts)) => parts
+            .iter()
+            .filter_map(|part| match str_at(part, "type").unwrap_or_default() {
+                "text" => Some(str_at(part, "text").unwrap_or_default().to_string()),
+                "image" => Some("[image]".to_string()),
+                "tool_reference" => None,
+                t => {
+                    session.record_unhandled(&format!("block/{t}"), 1);
+                    None
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("\n"),
+        _ => String::new(),
+    }
+}
+
+/// The display name and summary for a tool call.
+fn tool_label(name: &str, input: &Value) -> (String, String) {
+    if let Some((server, tool)) = mcp_name(name) {
+        let summary = if input.is_null() {
+            String::new()
+        } else {
+            input.to_string()
+        };
+        return (format!("{server}.{tool}"), summary);
+    }
+    let summary = match name {
+        "AskUserQuestion" => array_at(input, "questions")
+            .first()
+            .and_then(|q| str_at(q, "question")),
+        _ => SUMMARY_FIELDS
+            .iter()
+            .find(|(tool, _)| *tool == name)
+            .and_then(|(_, field)| str_at(input, field)),
+    };
+    (name.to_string(), summary.unwrap_or_default().to_string())
+}
+
+/// Server names can contain `__`, so the tool is what follows the last one.
+fn mcp_name(name: &str) -> Option<(&str, &str)> {
+    let (server, tool) = name.strip_prefix(MCP_PREFIX)?.rsplit_once("__")?;
+    (!server.is_empty() && !tool.is_empty()).then_some((server, tool))
 }
 
 /// Cleans each text piece on its own, since injected tags never span blocks,
@@ -325,6 +431,14 @@ mod tests {
 
     fn text(t: &str) -> Value {
         json!({"type": "text", "text": t})
+    }
+
+    fn tool_use(id: &str, name: &str, input: Value) -> Value {
+        json!({"type": "tool_use", "id": id, "name": name, "input": input})
+    }
+
+    fn tool_result(id: &str, content: Value) -> Value {
+        json!({"type": "tool_result", "tool_use_id": id, "content": content})
     }
 
     fn try_parse(records: &[Value]) -> Result<Session, LoadError> {
@@ -700,6 +814,268 @@ mod tests {
         assert_eq!(
             s.unhandled,
             BTreeMap::from([("claude:block/".to_string(), 2)])
+        );
+    }
+
+    // cc2md: BuildTurns_ToolLinking
+    #[test]
+    fn tool_use_pairs_with_result() {
+        let s = parse_all(&[
+            assistant(json!([tool_use(
+                "tool-1",
+                "Bash",
+                json!({"command": "ls"})
+            )])),
+            user(json!([tool_result("tool-1", json!("file.txt"))])),
+        ]);
+        assert_eq!(lines(&s), [r#"tool: Bash [ls] Some("file.txt")"#]);
+    }
+
+    // cc2md: BuildTurns_ToolResultArrayContent, plus the other block kinds.
+    #[test]
+    fn result_blocks_join_with_newlines() {
+        let s = parse_all(&[
+            assistant(json!([tool_use("tool-1", "Read", json!({}))])),
+            user(json!([tool_result(
+                "tool-1",
+                json!([
+                    text("line1"),
+                    text("line2"),
+                    {"type": "tool_reference", "tool_name": "Read"},
+                    {"type": "image", "source": {}},
+                    {"type": "hologram"},
+                ])
+            )])),
+        ]);
+        assert_eq!(
+            lines(&s),
+            [r#"tool: Read [] Some("line1\nline2\n[image]")"#]
+        );
+        assert_eq!(
+            s.unhandled,
+            BTreeMap::from([("claude:block/hologram".to_string(), 1)])
+        );
+    }
+
+    // cc2md: BuildTurns_ToolResultNoContent. Changed: None, not "".
+    #[test]
+    fn empty_result_is_none() {
+        let s = parse_all(&[
+            assistant(json!([tool_use("tool-1", "Bash", json!({}))])),
+            user(json!([{"type": "tool_result", "tool_use_id": "tool-1"}])),
+            assistant(json!([tool_use("tool-2", "Bash", json!({}))])),
+            user(json!([tool_result("tool-2", json!("  \n"))])),
+        ]);
+        assert_eq!(lines(&s), ["tool: Bash [] None", "tool: Bash [] None"]);
+    }
+
+    // cc2md: BuildTurns_ErrorResults
+    #[test]
+    fn is_error_sets_failed() {
+        let mut result = tool_result("tool-1", json!("error msg"));
+        result["is_error"] = json!(true);
+        let s = parse_all(&[
+            assistant(json!([tool_use("tool-1", "Bash", json!({}))])),
+            user(json!([result])),
+        ]);
+        assert_eq!(lines(&s), [r#"tool: Bash [] Some("error msg") failed"#]);
+    }
+
+    // cc2md: BuildTurns_UserTextAlongsideToolResults
+    #[test]
+    fn user_text_alongside_results() {
+        let s = parse_all(&[
+            assistant(json!([tool_use("tool-1", "Bash", json!({}))])),
+            user(json!([
+                tool_result("tool-1", json!("ok")),
+                text("User followup")
+            ])),
+        ]);
+        assert_eq!(
+            lines(&s),
+            [r#"tool: Bash [] Some("ok")"#, "user: User followup"]
+        );
+    }
+
+    // cc2md: BuildTurns_RealisticConversation. Changed: entries stay in file order.
+    #[test]
+    fn realistic_conversation_keeps_file_order() {
+        let s = parse_all(&[
+            user(json!("Fix the bug")),
+            assistant(json!([
+                {"type": "thinking", "thinking": "I need to read the file"},
+                text("Let me look at the code."),
+                tool_use("t1", "Read", json!({"file_path": "src/app.ts"})),
+            ])),
+            user(json!([tool_result("t1", json!("const x = 1;"))])),
+            assistant(json!([
+                text("I found the issue."),
+                tool_use("t2", "Edit", json!({"file_path": "src/app.ts"})),
+            ])),
+            user(json!([tool_result("t2", json!("ok"))])),
+            assistant(json!([text("Done!")])),
+        ]);
+        assert_eq!(
+            lines(&s),
+            [
+                "user: Fix the bug",
+                "thinking: I need to read the file",
+                "assistant: Let me look at the code.",
+                r#"tool: Read [src/app.ts] Some("const x = 1;")"#,
+                "assistant: I found the issue.",
+                r#"tool: Edit [src/app.ts] Some("ok")"#,
+                "assistant: Done!",
+            ]
+        );
+    }
+
+    #[test]
+    fn unmatched_results_are_dropped() {
+        let s = parse_all(&[
+            user(json!([tool_result("early", json!("too soon"))])),
+            assistant(json!([
+                tool_use("early", "Read", json!({})),
+                tool_use("once", "Read", json!({})),
+            ])),
+            user(json!([
+                tool_result("once", json!("first")),
+                tool_result("once", json!("second")),
+                tool_result("nobody", json!("orphan")),
+            ])),
+        ]);
+        assert_eq!(
+            lines(&s),
+            ["tool: Read [] None", r#"tool: Read [] Some("first")"#]
+        );
+    }
+
+    #[test]
+    fn mistyped_tool_fields_degrade() {
+        let s = parse_all(&[
+            assistant(json!([
+                {"type": "tool_use", "id": "t1", "name": "Bash", "input": "ls"},
+                {"type": "tool_use"},
+            ])),
+            user(json!([{
+                "type": "tool_result",
+                "tool_use_id": "t1",
+                "content": {"text": "x"},
+                "is_error": "yes",
+            }])),
+        ]);
+        assert_eq!(lines(&s), ["tool: Bash [] None", "tool:  [] None"]);
+    }
+
+    #[test]
+    fn basic_fixture() {
+        let s = session("basic.jsonl");
+        assert_eq!(
+            lines(&s),
+            [
+                "user: Add a greeting to the sample CLI",
+                "thinking: The user wants a greeting. Look at main.rs first.",
+                r#"tool: Read [/Users/user/Workspaces/sample/src/main.rs] Some("1\tfn main() {}\n")"#,
+                r#"tool: Bash [cargo test] Some("error: could not compile `sample`") failed"#,
+                r#"tool: Edit [/Users/user/Worktrees/sample/feature/src/main.rs] Some("The file has been updated.")"#,
+                "assistant: Added a `println!` greeting. Tests failed to compile before the edit.",
+            ]
+        );
+        assert_eq!(
+            s.cwds,
+            [
+                PathBuf::from("/Users/user/Workspaces/sample"),
+                PathBuf::from("/Users/user/Worktrees/sample/feature"),
+            ]
+        );
+        assert_eq!(s.cc_version.as_deref(), Some("v2.1.259"));
+        assert_eq!(s.model.as_deref(), Some("claude-fable-5-1"));
+        assert!(s.unhandled.is_empty(), "{:?}", s.unhandled);
+    }
+
+    #[test]
+    fn tool_edges_fixture() {
+        let s = session("tool_edges.jsonl");
+        assert_eq!(
+            lines(&s),
+            [
+                "user: Search the docs for the config format",
+                r#"tool: Grep [config] Some("docs/config.md\n[image]")"#,
+                "assistant: Reading the file now.",
+                "tool: Read [/Users/user/Workspaces/sample/docs/config.md] None",
+            ]
+        );
+        assert!(s.unhandled.is_empty(), "{:?}", s.unhandled);
+    }
+
+    #[test]
+    fn summaries_by_tool() {
+        for (name, input, want) in [
+            ("Bash", json!({"command": "cargo test"}), "cargo test"),
+            ("Read", json!({"file_path": "/a"}), "/a"),
+            ("Write", json!({"file_path": "/b"}), "/b"),
+            ("Edit", json!({"file_path": "/c"}), "/c"),
+            (
+                "NotebookEdit",
+                json!({"notebook_path": "/n.ipynb"}),
+                "/n.ipynb",
+            ),
+            ("Glob", json!({"pattern": "**/*.rs"}), "**/*.rs"),
+            ("Grep", json!({"pattern": "fn main"}), "fn main"),
+            ("WebSearch", json!({"query": "rust"}), "rust"),
+            ("ToolSearch", json!({"query": "select:Read"}), "select:Read"),
+            (
+                "WebFetch",
+                json!({"url": "https://example.com"}),
+                "https://example.com",
+            ),
+            (
+                "Agent",
+                json!({"description": "Survey", "prompt": "long"}),
+                "Survey",
+            ),
+            ("Task", json!({"description": "Old survey"}), "Old survey"),
+            ("Skill", json!({"skill": "review"}), "review"),
+            ("TaskCreate", json!({"subject": "Write docs"}), "Write docs"),
+            ("TaskUpdate", json!({"taskId": "7"}), "7"),
+            ("SendMessage", json!({"to": "researcher"}), "researcher"),
+            (
+                "AskUserQuestion",
+                json!({"questions": [{"question": "Which?"}, {"question": "Second?"}]}),
+                "Which?",
+            ),
+            ("Bash", json!({"command": 5}), ""),
+            ("AskUserQuestion", json!({"questions": []}), ""),
+            ("Unlisted", json!({"anything": "x"}), ""),
+        ] {
+            assert_eq!(
+                tool_label(name, &input),
+                (name.to_string(), want.to_string()),
+                "{name}"
+            );
+        }
+    }
+
+    #[test]
+    fn mcp_tools_are_named_by_server() {
+        let input = json!({"query": "parser", "limit": 5});
+        assert_eq!(
+            tool_label("mcp__github__search_code", &input),
+            (
+                "github.search_code".to_string(),
+                r#"{"query":"parser","limit":5}"#.to_string()
+            )
+        );
+        assert_eq!(
+            tool_label("mcp__plugin_x__server__search", &input).0,
+            "plugin_x__server.search"
+        );
+        assert_eq!(
+            tool_label("mcp__foo", &input),
+            ("mcp__foo".to_string(), String::new())
+        );
+        assert_eq!(
+            tool_label("mcp__github__ping", &Value::Null),
+            ("github.ping".to_string(), String::new())
         );
     }
 }
