@@ -1,0 +1,101 @@
+{
+  "formula": "mol-feature",
+  "description": "{{name}}: design, plan, execute, pull request, Codex review, squash merge. Spec: {{spec}}. Task note: {{note}}.",
+  "version": 1,
+  "type": "workflow",
+  "vars": {
+    "name": {
+      "description": "Human name of the feature, e.g. 'Claude adapter'.",
+      "required": true
+    },
+    "spec": {
+      "description": "Design doc and section the work implements, e.g. '~/org/Projects/ganymede/Design and build ganymede v1.md §5'.",
+      "required": true
+    },
+    "note": {
+      "description": "Vault task note org-task works in, e.g. '~/org/Projects/ganymede/Build the Claude adapter.md'. org-task creates it if missing.",
+      "required": true
+    },
+    "context": {
+      "description": "Extra design inputs, e.g. 'the survey notes on ganymede-bjb.5'.",
+      "default": "the parent issue's notes"
+    },
+    "checks": {
+      "description": "Commands that MUST pass before the work is done.",
+      "default": "direnv exec . cargo test and direnv exec . cargo clippy --all-targets -- -D warnings"
+    },
+    "repo": {
+      "description": "Forge repository for the pull request.",
+      "default": "github.com/ryane/ganymede"
+    },
+    "base": {
+      "description": "Branch the work forks from and merges into.",
+      "default": "main"
+    }
+  },
+  "steps": [
+    {
+      "id": "design",
+      "title": "{{name}}: design",
+      "description": "Invoke ryane-skills:org-task on {{note}} (or '/org-task new' if it does not exist yet). Its Brainstorm phase designs the {{name}} from {{spec}} and {{context}}. Amend the spec with the outcome.",
+      "notes": "org-task owns the note's status, time entries, and (org-task) log lines; follow its conventions rather than writing them by hand. Close this step when the spec is approved and org-task sets status: planning. Link to the spec note by its current filename; notes get renamed. Nothing in the repo.",
+      "type": "task",
+      "priority": 1
+    },
+    {
+      "id": "plan",
+      "title": "{{name}}: plan",
+      "description": "Continue org-task into its Plan phase: the plan goes under '# Implementation plan' in {{note}}.",
+      "notes": "Close this step at org-task's 'Ready to execute?' gate, once the user has approved the plan and chosen native or subagent-driven execution.",
+      "type": "task",
+      "priority": 1,
+      "depends_on": [
+        "design"
+      ]
+    },
+    {
+      "id": "execute",
+      "title": "{{name}}: execute",
+      "description": "Continue org-task into its Execute phase on a feature branch off {{base}}. {{checks}} pass.",
+      "notes": "Caller override for org-task's Complete phase: suppress steps 3-4. Leave status: executing and log the deferred done-write; the squash-merge step writes done. End with a fresh whole-branch review on the most capable model; fix Critical and Important findings test-first; record deferred minors. When a fix changes behaviour, update the spec and the note's '# Design' to match. Use bd update --append-notes; --notes replaces existing notes.",
+      "type": "task",
+      "priority": 1,
+      "depends_on": [
+        "plan"
+      ]
+    },
+    {
+      "id": "open-pull-request",
+      "title": "{{name}}: open pull request",
+      "description": "Push the feature branch and open a PR against {{base}} on {{repo}}.",
+      "notes": "Set status: in-review on {{note}}, with an (org-task)-format log line. PR body covers interface changes, behaviour, validation, and known gaps. No attribution lines.",
+      "type": "task",
+      "priority": 1,
+      "depends_on": [
+        "execute"
+      ]
+    },
+    {
+      "id": "codex-review",
+      "title": "{{name}}: Codex review",
+      "description": "Run ryane-skills:codex-review on the PR until findings are resolved.",
+      "notes": "Five-round budget. At the cap, stop and ask the user before running further rounds. When one area draws repeated findings, fix the root cause instead of tightening the same heuristic again. Keep the spec and the task note in sync with each fix.",
+      "type": "task",
+      "priority": 1,
+      "depends_on": [
+        "open-pull-request"
+      ]
+    },
+    {
+      "id": "squash-merge",
+      "title": "{{name}}: squash merge",
+      "description": "Squash-merge the PR once the user approves. Do not merge without explicit approval.",
+      "notes": "Subject lowercase, imperative, 50 characters or fewer. Then update local {{base}}, run {{checks}}, and close this epic. Set status: done and completedDate on {{note}}, with a log line. File follow-up issues for deferred findings, and append interface changes to the notes of dependent issues. Ask before deleting the branch.",
+      "type": "task",
+      "priority": 1,
+      "depends_on": [
+        "codex-review"
+      ]
+    }
+  ]
+}
