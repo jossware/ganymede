@@ -1,0 +1,138 @@
+---
+source: src/harness/codex.rs
+expression: "session(\"tui.jsonl\")"
+---
+Session {
+    harness: Codex,
+    id: "01a0b000-0000-7000-8000-000000000001",
+    harness_version: Some(
+        "0.157.0",
+    ),
+    model: Some(
+        "gpt-6-astra",
+    ),
+    cwds: [
+        "/Users/user/Workspaces/sample",
+        "/Users/user/Worktrees/sample/verbose",
+    ],
+    started_at: Some(
+        2026-09-15T19:42:00Z,
+    ),
+    title_source: Some(
+        "Add a --verbose flag to the sample CLI",
+    ),
+    cc_version: None,
+    entries: [
+        User {
+            at: Some(
+                2026-09-15T19:42:06.266Z,
+            ),
+            text: "Add a --verbose flag to the sample CLI",
+        },
+        Thinking {
+            at: Some(
+                2026-09-15T19:42:07.477Z,
+            ),
+            text: "Checking how flags are parsed",
+        },
+        Assistant {
+            at: Some(
+                2026-09-15T19:42:09.899Z,
+            ),
+            text: "Looking at the argument parser first.",
+        },
+        Tool {
+            at: Some(
+                2026-09-15T19:42:11.321Z,
+            ),
+            name: "Shell",
+            summary: "rg -n \"clap\" src",
+            output: Some(
+                "src/cli.rs:1:use clap::Parser;\n",
+            ),
+            failed: false,
+        },
+        Tool {
+            at: Some(
+                2026-09-15T19:42:12.532Z,
+            ),
+            name: "Shell",
+            summary: "cargo test --quiet",
+            output: Some(
+                "error[E0425]: cannot find value `verbose`\n",
+            ),
+            failed: true,
+        },
+        Tool {
+            at: Some(
+                2026-09-15T19:42:13.743Z,
+            ),
+            name: "Shell",
+            summary: "false",
+            output: None,
+            failed: true,
+        },
+        Tool {
+            at: Some(
+                2026-09-15T19:42:14.954Z,
+            ),
+            name: "Edit",
+            summary: "update src/cli.rs, add tests/verbose.rs, delete src/old.rs",
+            output: Some(
+                "src/cli.rs:\n@@ -1 +1,2 @@\n+    verbose: bool,\ntests/verbose.rs:\n#[test]\nfn verbose() {}\n",
+            ),
+            failed: false,
+        },
+        Tool {
+            at: Some(
+                2026-09-15T19:42:15.165Z,
+            ),
+            name: "Edit",
+            summary: "update README.md",
+            output: Some(
+                "README.md:\n@@ -1 +1 @@\n",
+            ),
+            failed: true,
+        },
+        Tool {
+            at: Some(
+                2026-09-15T19:42:16.376Z,
+            ),
+            name: "docs.search",
+            summary: "{\"query\":\"clap verbose flag\",\"max_results\":3}",
+            output: Some(
+                "Use ArgAction::Count.",
+            ),
+            failed: false,
+        },
+        Tool {
+            at: Some(
+                2026-09-15T19:42:17.587Z,
+            ),
+            name: "cua_repl.js",
+            summary: "{\"code\":\"throw new Error()\",\"title\":\"probe\"}",
+            output: None,
+            failed: true,
+        },
+        Assistant {
+            at: Some(
+                2026-09-15T19:42:18.798Z,
+            ),
+            text: "Added `--verbose`. One test still fails to compile.",
+        },
+        User {
+            at: Some(
+                2026-09-15T19:42:29.119Z,
+            ),
+            text: "Thanks",
+        },
+        Assistant {
+            at: Some(
+                2026-09-15T19:42:30.33Z,
+            ),
+            text: "You’re welcome.",
+        },
+    ],
+    unhandled: {},
+    transcript: "tui.jsonl",
+}

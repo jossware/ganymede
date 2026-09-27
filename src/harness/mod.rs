@@ -114,7 +114,7 @@ pub fn detect(records: &Records) -> Detected {
 
 #[derive(Debug)]
 pub enum Loaded {
-    Session(Session),
+    Session(Box<Session>),
     /// No user turn: no note and no error.
     Empty,
     /// The adapter filtered the transcript out; the reason is for stderr.
@@ -147,7 +147,7 @@ pub fn load(path: &Path, harness: Option<Harness>, force: bool) -> Result<Loaded
     Ok(if session.is_empty() {
         Loaded::Empty
     } else {
-        Loaded::Session(session)
+        Loaded::Session(Box::new(session))
     })
 }
 

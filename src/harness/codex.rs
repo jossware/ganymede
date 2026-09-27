@@ -143,12 +143,7 @@ pub fn parse(records: &Records, session: &mut Session) -> Result<(), LoadError> 
     Ok(())
 }
 
-fn map_item(
-    item: &Value,
-    ts: Option<Timestamp>,
-    turn_cwd: Option<&Path>,
-    session: &mut Session,
-) {
+fn map_item(item: &Value, ts: Option<Timestamp>, turn_cwd: Option<&Path>, session: &mut Session) {
     let entry = match str_at(item, "type").unwrap_or_default() {
         "UserMessage" => user_message(item, ts, session),
         "AgentMessage" => agent_message(item, ts, session),
@@ -159,7 +154,14 @@ fn map_item(
         "WebSearch" => Some(web_search(item, ts)),
         "ImageView" => {
             let path = file_path(str_at(item, "path").unwrap_or_default());
-            Some(tool(item, ts, "ImageView".into(), path, String::new(), false))
+            Some(tool(
+                item,
+                ts,
+                "ImageView".into(),
+                path,
+                String::new(),
+                false,
+            ))
         }
         "Plan" => Some(plan(item, ts)),
         "CollabAgentToolCall" => {
@@ -358,9 +360,7 @@ fn user_message(item: &Value, ts: Option<Timestamp>, session: &mut Session) -> O
     let mut parts = Vec::new();
     for block in array_at(item, "content") {
         match str_at(block, "type").unwrap_or_default() {
-            "text" => parts.push(clean_user_text(
-                str_at(block, "text").unwrap_or_default(),
-            )),
+            "text" => parts.push(clean_user_text(str_at(block, "text").unwrap_or_default())),
             "image" => parts.push("[image]".to_string()),
             t => session.record_unhandled(&format!("block/{t}"), 1),
         }
@@ -529,7 +529,11 @@ mod tests {
 
     #[test]
     fn interactive_sessions_are_kept() {
-        for name in ["tui.jsonl", "desktop_chat.jsonl", "legacy_interactive.jsonl"] {
+        for name in [
+            "tui.jsonl",
+            "desktop_chat.jsonl",
+            "legacy_interactive.jsonl",
+        ] {
             assert_eq!(skip_reason(&fixture(name)), None, "{name}");
         }
     }
@@ -586,7 +590,10 @@ mod tests {
     #[test]
     fn messages_keep_file_order_and_every_phase() {
         let s = session("tui.jsonl");
-        assert_eq!(users(&s), ["Add a --verbose flag to the sample CLI", "Thanks"]);
+        assert_eq!(
+            users(&s),
+            ["Add a --verbose flag to the sample CLI", "Thanks"]
+        );
         assert_eq!(
             assistants(&s),
             [
@@ -624,7 +631,10 @@ mod tests {
 
     #[test]
     fn skill_without_args_titles_by_invocation() {
-        assert_eq!(session("skill_only.jsonl").title_source.as_deref(), Some("$standup"));
+        assert_eq!(
+            session("skill_only.jsonl").title_source.as_deref(),
+            Some("$standup")
+        );
     }
 
     #[test]
@@ -653,7 +663,10 @@ mod tests {
 
     #[test]
     fn quit_before_first_turn_is_empty() {
-        assert!(matches!(load_fixture("no_turns.jsonl", false), Ok(Loaded::Empty)));
+        assert!(matches!(
+            load_fixture("no_turns.jsonl", false),
+            Ok(Loaded::Empty)
+        ));
     }
 
     #[test]
@@ -675,7 +688,10 @@ mod tests {
 
     #[test]
     fn force_archives_non_interactive() {
-        assert!(matches!(load_fixture("exec.jsonl", true), Ok(Loaded::Session(_))));
+        assert!(matches!(
+            load_fixture("exec.jsonl", true),
+            Ok(Loaded::Session(_))
+        ));
     }
 
     #[test]
@@ -754,7 +770,10 @@ mod tests {
 
     #[test]
     fn clean_strips_unclosed_browser_context_to_end() {
-        assert_eq!(clean_user_text("Fix it\n<in-app-browser-context>\nstate"), "Fix it");
+        assert_eq!(
+            clean_user_text("Fix it\n<in-app-browser-context>\nstate"),
+            "Fix it"
+        );
     }
 
     #[test]
@@ -798,18 +817,45 @@ mod tests {
         assert_eq!(
             tools(&s),
             [
-                ("Shell", r#"rg -n "clap" src"#, Some("src/cli.rs:1:use clap::Parser;\n"), false),
-                ("Shell", "cargo test --quiet", Some("error[E0425]: cannot find value `verbose`\n"), true),
+                (
+                    "Shell",
+                    r#"rg -n "clap" src"#,
+                    Some("src/cli.rs:1:use clap::Parser;\n"),
+                    false
+                ),
+                (
+                    "Shell",
+                    "cargo test --quiet",
+                    Some("error[E0425]: cannot find value `verbose`\n"),
+                    true
+                ),
                 ("Shell", "false", None, true),
                 (
                     "Edit",
                     "update src/cli.rs, add tests/verbose.rs, delete src/old.rs",
-                    Some("src/cli.rs:\n@@ -1 +1,2 @@\n+    verbose: bool,\ntests/verbose.rs:\n#[test]\nfn verbose() {}\n"),
+                    Some(
+                        "src/cli.rs:\n@@ -1 +1,2 @@\n+    verbose: bool,\ntests/verbose.rs:\n#[test]\nfn verbose() {}\n"
+                    ),
                     false,
                 ),
-                ("Edit", "update README.md", Some("README.md:\n@@ -1 +1 @@\n"), true),
-                ("docs.search", r#"{"query":"clap verbose flag","max_results":3}"#, Some("Use ArgAction::Count."), false),
-                ("cua_repl.js", r#"{"code":"throw new Error()","title":"probe"}"#, None, true),
+                (
+                    "Edit",
+                    "update README.md",
+                    Some("README.md:\n@@ -1 +1 @@\n"),
+                    true
+                ),
+                (
+                    "docs.search",
+                    r#"{"query":"clap verbose flag","max_results":3}"#,
+                    Some("Use ArgAction::Count."),
+                    false
+                ),
+                (
+                    "cua_repl.js",
+                    r#"{"code":"throw new Error()","title":"probe"}"#,
+                    None,
+                    true
+                ),
             ]
         );
     }
@@ -817,7 +863,10 @@ mod tests {
     #[test]
     fn command_summary_unwraps_shell_scripts() {
         let argv = |a: &[&str]| a.iter().map(|s| json!(s)).collect::<Vec<_>>();
-        assert_eq!(command_summary(&argv(&["/bin/zsh", "-lc", "ls -la"])), "ls -la");
+        assert_eq!(
+            command_summary(&argv(&["/bin/zsh", "-lc", "ls -la"])),
+            "ls -la"
+        );
         assert_eq!(command_summary(&argv(&["bash", "-c", "x"])), "x");
         assert_eq!(command_summary(&argv(&["cargo", "test"])), "cargo test");
         assert_eq!(command_summary(&argv(&["sh", "-c"])), "sh -c");
@@ -850,7 +899,12 @@ mod tests {
         }));
         assert_eq!(
             tools(&s),
-            [("github.fetch_file", r#"{"path":"README.md"}"#, Some("not found"), true)]
+            [(
+                "github.fetch_file",
+                r#"{"path":"README.md"}"#,
+                Some("not found"),
+                true
+            )]
         );
     }
 
@@ -862,7 +916,12 @@ mod tests {
         }));
         assert_eq!(
             tools(&s),
-            [("Edit", "add /a/b.rs", Some("/a/b.rs:\nx\nno parent dir"), true)]
+            [(
+                "Edit",
+                "add /a/b.rs",
+                Some("/a/b.rs:\nx\nno parent dir"),
+                true
+            )]
         );
     }
 
@@ -887,7 +946,10 @@ mod tests {
 
     #[test]
     fn encrypted_reasoning_is_dropped() {
-        assert_eq!(thinking(&session("tui.jsonl")), ["Checking how flags are parsed"]);
+        assert_eq!(
+            thinking(&session("tui.jsonl")),
+            ["Checking how flags are parsed"]
+        );
     }
 
     #[test]
@@ -913,7 +975,12 @@ mod tests {
                     None,
                     false,
                 ),
-                ("Plan", "1. Inspect header CSS", Some("1. Inspect header CSS\n2. Fix alignment"), false),
+                (
+                    "Plan",
+                    "1. Inspect header CSS",
+                    Some("1. Inspect header CSS\n2. Fix alignment"),
+                    false
+                ),
                 ("CollabAgentToolCall", "spawn_agent", None, false),
             ]
         );
@@ -921,7 +988,9 @@ mod tests {
 
     #[test]
     fn web_search_uses_action_query() {
-        let s = map_one(json!({"type": "WebSearch", "query": "", "action": {"type": "search", "query": "rust"}}));
+        let s = map_one(
+            json!({"type": "WebSearch", "query": "", "action": {"type": "search", "query": "rust"}}),
+        );
         assert_eq!(tools(&s), [("WebSearch", "rust", None, false)]);
     }
 
@@ -930,7 +999,12 @@ mod tests {
         let s = map_one(json!({"type": "Plan", "text": "\n# Worktree plan\n\nBody"}));
         assert_eq!(
             tools(&s),
-            [("Plan", "Worktree plan", Some("\n# Worktree plan\n\nBody"), false)]
+            [(
+                "Plan",
+                "Worktree plan",
+                Some("\n# Worktree plan\n\nBody"),
+                false
+            )]
         );
     }
 
@@ -942,5 +1016,62 @@ mod tests {
         assert_eq!(file_path("/x/%zz"), "/x/%zz");
         assert_eq!(file_path("/x/%4"), "/x/%4");
         assert_eq!(file_path("/plain"), "/plain");
+    }
+
+    #[test]
+    fn edge_items() {
+        let s = session("edges.jsonl");
+        assert_eq!(users(&s), ["Summarise the attached notes"]);
+        assert_eq!(thinking(&s), ["Raw chain of thought"]);
+        assert_eq!(
+            tools(&s),
+            [
+                (
+                    "github.fetch_file",
+                    r#"{"path":"README.md"}"#,
+                    Some("not found"),
+                    true
+                ),
+                (
+                    "Edit",
+                    "update src/old_name.rs → src/new_name.rs",
+                    Some("src/old_name.rs:\n@@ -1 +1 @@\n"),
+                    false
+                ),
+                (
+                    "ImageView",
+                    "/Users/user/Workspaces/sample/shots/header bar.png",
+                    None,
+                    false
+                ),
+            ]
+        );
+        assert_eq!(
+            assistants(&s),
+            ["Which pages should I capture?\n\n- One of each page type\n- Every page"]
+        );
+    }
+
+    #[test]
+    fn known_fixtures_tally_nothing() {
+        for name in [
+            "tui.jsonl",
+            "desktop_chat.jsonl",
+            "skill_only.jsonl",
+            "edges.jsonl",
+            "legacy_interactive.jsonl",
+        ] {
+            assert_eq!(session(name).unhandled, BTreeMap::new(), "{name}");
+        }
+    }
+
+    #[test]
+    fn tui_snapshot() {
+        insta::assert_debug_snapshot!("tui", session("tui.jsonl"));
+    }
+
+    #[test]
+    fn desktop_chat_snapshot() {
+        insta::assert_debug_snapshot!("desktop_chat", session("desktop_chat.jsonl"));
     }
 }
