@@ -1,0 +1,133 @@
+---
+source: src/harness/claude.rs
+expression: "session(\"modern.jsonl\")"
+---
+Session {
+    harness: Claude,
+    id: "5f0c2a1e-0000-4000-8000-000000c0ffee",
+    harness_version: Some(
+        "2.1.259",
+    ),
+    model: Some(
+        "claude-fable-5-1",
+    ),
+    cwds: [
+        "/Users/user/Workspaces/sample",
+    ],
+    started_at: Some(
+        2026-09-04T02:25:43.891Z,
+    ),
+    title_source: Some(
+        "Check the repo",
+    ),
+    cc_version: Some(
+        "v2.1.259",
+    ),
+    entries: [
+        User {
+            at: Some(
+                2026-09-04T02:25:43.891Z,
+            ),
+            text: "Check the repo",
+        },
+        Assistant {
+            at: Some(
+                2026-09-04T02:25:44.028Z,
+            ),
+            text: "You've hit your monthly spend limit",
+        },
+        User {
+            at: Some(
+                2026-09-04T02:25:45.165Z,
+            ),
+            text: "! ls",
+        },
+        Tool {
+            at: Some(
+                2026-09-04T02:25:46.302Z,
+            ),
+            name: "!",
+            summary: "ls",
+            output: Some(
+                "Cargo.toml",
+            ),
+            failed: false,
+        },
+        User {
+            at: Some(
+                2026-09-04T02:25:47.439Z,
+            ),
+            text: "What does it contain?",
+        },
+        Tool {
+            at: Some(
+                2026-09-04T02:25:48.576Z,
+            ),
+            name: "local command",
+            summary: "",
+            output: Some(
+                "stray output",
+            ),
+            failed: false,
+        },
+        Tool {
+            at: Some(
+                2026-09-04T02:25:49.713Z,
+            ),
+            name: "Agent",
+            summary: "Survey tests",
+            output: Some(
+                "Three tests.",
+            ),
+            failed: false,
+        },
+        Tool {
+            at: Some(
+                2026-09-04T02:25:49.713Z,
+            ),
+            name: "Skill",
+            summary: "review",
+            output: Some(
+                "Launching skill: review",
+            ),
+            failed: false,
+        },
+        Tool {
+            at: Some(
+                2026-09-04T02:25:51.987Z,
+            ),
+            name: "AskUserQuestion",
+            summary: "Which module first?",
+            output: Some(
+                "User answered: parser",
+            ),
+            failed: false,
+        },
+        Tool {
+            at: Some(
+                2026-09-04T02:25:54.398Z,
+            ),
+            name: "plugin_x__server.search",
+            summary: "{\"query\":\"parser\",\"limit\":5}",
+            output: Some(
+                "parser.rs",
+            ),
+            failed: false,
+        },
+        AgentReport {
+            at: Some(
+                2026-09-04T02:25:57.809Z,
+            ),
+            name: "compaction",
+            text: "This session is being continued from a previous conversation that ran out of context.\n\nSummary:\n1. The user asked to check the repo.",
+        },
+        Assistant {
+            at: Some(
+                2026-09-04T02:25:58.946Z,
+            ),
+            text: "Continuing with the parser.",
+        },
+    ],
+    unhandled: {},
+    transcript: "modern.jsonl",
+}
