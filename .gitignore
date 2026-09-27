@@ -6,3 +6,7 @@
 .beads/proxieddb/
 .beads/issues.jsonl
 *.gate.lock*
+
+# Rust / Nix
+/target
+/result
