@@ -141,6 +141,23 @@ r.agent('Yesterday: fixed the parser.')
 r.end_turn('Yesterday: fixed the parser.')
 r.write('skill_only.jsonl')
 
+# edges: item shapes from real rollouts that tui and desktop_chat lack.
+r = R('01a0b000-0000-7000-8000-000000000024', REPO)
+r.start_turn()
+r.user('\n# Files mentioned by the user:\n\n## notes.md: /Users/user/Workspaces/sample/notes.md\n\nSummarise the attached notes\n')
+r.item({'type': 'Reasoning', 'id': r.iid('rs_'), 'summary_text': [], 'raw_content': [{'type': 'reasoning_text', 'text': 'Raw chain of thought'}]}, started=False)
+r.item({'type': 'McpToolCall', 'id': r.iid(), 'server': 'codex_apps', 'tool': 'github.fetch_file', 'arguments': {'path': 'README.md'}, 'readOnlyHint': True, 'status': 'completed', 'result': {'content': [{'type': 'text', 'text': 'not found'}], 'isError': True}, 'duration': {'secs': 0, 'nanos': 1000}})
+r.item({'type': 'FileChange', 'id': r.iid('call_'), 'changes': {f'{REPO}/src/old_name.rs': {'type': 'update', 'unified_diff': '@@ -1 +1 @@\n', 'move_path': f'{REPO}/src/new_name.rs'}}, 'status': 'completed', 'stdout': 'Success.'}, started=False)
+r.item({'type': 'ImageView', 'id': r.iid(), 'path': 'file://' + REPO + '/shots/header%20bar.png'})
+r.item({'type': 'AgentMessage', 'id': r.iid('msg_'), 'content': [{'type': 'Text', 'text': 'Which pages should I capture?'}], 'phase': 'final_answer', 'questions': [{'title': 'Which pages should I capture?', 'options': ['One of each page type', 'Every page']}]})
+r.end_turn('Which pages should I capture?')
+r.start_turn()
+reply = [{'questionItemId': '["request_user_input_async","call_0001",0]', 'question': 'Which pages should I capture?', 'answer': 'Every page'}]
+r.user('<send_user_message_question_reply>\n' + json.dumps(reply, ensure_ascii=False, separators=(',', ':')) + '\n</send_user_message_question_reply>')
+r.agent('Capturing every page.')
+r.end_turn('Capturing every page.')
+r.write('edges.jsonl')
+
 # Non-interactive sessions the filter skips.
 def minimal(name, sid, **meta):
     r = R(sid, REPO, **meta)

@@ -1,0 +1,99 @@
+---
+source: src/harness/codex.rs
+expression: "session(\"desktop_chat.jsonl\")"
+---
+Session {
+    harness: Codex,
+    id: "01a0b000-0000-7000-8000-000000000002",
+    harness_version: Some(
+        "0.155.0-alpha.2.6",
+    ),
+    model: Some(
+        "gpt-6-astra",
+    ),
+    cwds: [
+        "/Users/user/Documents/Codex/2026-09-15/sample-chat",
+    ],
+    started_at: Some(
+        2026-09-15T19:42:00Z,
+    ),
+    title_source: Some(
+        "Why is the header misaligned?\n\n[image]",
+    ),
+    cc_version: None,
+    entries: [
+        User {
+            at: Some(
+                2026-09-15T19:42:06.266Z,
+            ),
+            text: "Why is the header misaligned?\n\n[image]",
+        },
+        Tool {
+            at: Some(
+                2026-09-15T19:42:07.477Z,
+            ),
+            name: "WebSearch",
+            summary: "css flex header alignment",
+            output: None,
+            failed: false,
+        },
+        Tool {
+            at: Some(
+                2026-09-15T19:42:08.688Z,
+            ),
+            name: "WebSearch",
+            summary: "https://example.com/flexbox",
+            output: None,
+            failed: false,
+        },
+        Tool {
+            at: Some(
+                2026-09-15T19:42:09.899Z,
+            ),
+            name: "ImageView",
+            summary: "/Users/user/Documents/Codex/2026-09-15/sample-chat/outputs/header.png",
+            output: None,
+            failed: false,
+        },
+        Tool {
+            at: Some(
+                2026-09-15T19:42:10.11Z,
+            ),
+            name: "Plan",
+            summary: "1. Inspect header CSS",
+            output: Some(
+                "1. Inspect header CSS\n2. Fix alignment",
+            ),
+            failed: false,
+        },
+        Tool {
+            at: Some(
+                2026-09-15T19:42:11.321Z,
+            ),
+            name: "CollabAgentToolCall",
+            summary: "spawn_agent",
+            output: None,
+            failed: false,
+        },
+        Assistant {
+            at: Some(
+                2026-09-15T19:42:12.532Z,
+            ),
+            text: "The header uses `align-items: baseline`; switch it to `center`.",
+        },
+        User {
+            at: Some(
+                2026-09-15T19:42:22.642Z,
+            ),
+            text: "$code-review check the CSS change",
+        },
+        Assistant {
+            at: Some(
+                2026-09-15T19:42:23.853Z,
+            ),
+            text: "The change looks correct.",
+        },
+    ],
+    unhandled: {},
+    transcript: "desktop_chat.jsonl",
+}

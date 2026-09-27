@@ -1,5 +1,6 @@
 mod claude;
 mod codex;
+mod json;
 
 use std::fmt;
 use std::fs;
@@ -111,29 +112,49 @@ pub fn detect(records: &Records) -> Detected {
     Detected::Unknown
 }
 
-/// Loads a transcript. `Ok(None)` means an empty session: no note, no error.
-pub fn load(path: &Path, harness: Option<Harness>) -> Result<Option<Session>, LoadError> {
+#[derive(Debug)]
+pub enum Loaded {
+    Session(Box<Session>),
+    /// No user turn: no note and no error.
+    Empty,
+    /// The adapter filtered the transcript out; the reason is for stderr.
+    Skipped(String),
+}
+
+/// Loads a transcript. `force` archives what an adapter's filter would skip.
+pub fn load(path: &Path, harness: Option<Harness>, force: bool) -> Result<Loaded, LoadError> {
     let records = Records::parse(&fs::read_to_string(path)?);
     let harness = match harness {
         Some(h) => h,
         None => match detect(&records) {
             Detected::Harness(h) => h,
-            Detected::Empty => return Ok(None),
+            Detected::Empty => return Ok(Loaded::Empty),
             Detected::Unknown => return Err(LoadError::Undetected),
         },
     };
+    if harness == Harness::Codex
+        && !force
+        && let Some(reason) = codex::skip_reason(&records)
+    {
+        return Ok(Loaded::Skipped(reason));
+    }
     let mut session = Session::new(harness, path.to_path_buf());
     match harness {
         Harness::Claude => claude::parse(&records, &mut session)?,
         Harness::Codex => codex::parse(&records, &mut session)?,
     }
     session.record_unhandled("malformed-line", records.malformed);
-    Ok((!session.is_empty()).then_some(session))
+    Ok(if session.is_empty() {
+        Loaded::Empty
+    } else {
+        Loaded::Session(Box::new(session))
+    })
 }
 
 #[cfg(test)]
 mod tests {
     use std::io::Write;
+    use std::path::PathBuf;
 
     use super::*;
 
@@ -249,15 +270,18 @@ mod tests {
     #[test]
     fn load_empty_file_is_empty_session() {
         let f = transcript("");
-        assert!(load(f.path(), None).unwrap().is_none());
+        assert!(matches!(load(f.path(), None, false), Ok(Loaded::Empty)));
     }
 
     #[test]
     fn load_override_skips_detection() {
         let f = transcript(r#"{"foo":1}"#);
-        assert!(matches!(load(f.path(), None), Err(LoadError::Undetected)));
+        assert!(matches!(
+            load(f.path(), None, false),
+            Err(LoadError::Undetected)
+        ));
         assert!(!matches!(
-            load(f.path(), Some(Harness::Claude)),
+            load(f.path(), Some(Harness::Claude), false),
             Err(LoadError::Undetected)
         ));
     }
@@ -265,7 +289,34 @@ mod tests {
     #[test]
     fn load_missing_file_is_io_error() {
         let dir = tempfile::tempdir().unwrap();
-        let err = load(&dir.path().join("nope.jsonl"), None).unwrap_err();
+        let err = load(&dir.path().join("nope.jsonl"), None, false).unwrap_err();
         assert!(matches!(err, LoadError::Io(_)));
+    }
+
+    fn codex_fixture(name: &str) -> PathBuf {
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/codex")
+            .join(name)
+    }
+
+    #[test]
+    fn load_skips_non_interactive_codex() {
+        let loaded = load(&codex_fixture("exec.jsonl"), None, false).unwrap();
+        assert!(
+            matches!(&loaded, Loaded::Skipped(r) if r == "non-interactive codex session (source: exec)"),
+            "{loaded:?}"
+        );
+    }
+
+    #[test]
+    fn load_force_bypasses_filter() {
+        let loaded = load(&codex_fixture("exec.jsonl"), None, true);
+        assert!(!matches!(loaded, Ok(Loaded::Skipped(_))));
+    }
+
+    #[test]
+    fn filter_is_codex_only() {
+        let loaded = load(&codex_fixture("exec.jsonl"), Some(Harness::Claude), false);
+        assert!(!matches!(loaded, Ok(Loaded::Skipped(_))));
     }
 }
