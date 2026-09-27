@@ -113,11 +113,13 @@ fn segments(text: &str) -> Vec<Segment<'_>> {
         let mut closed = false;
         for line in lines.by_ref() {
             fence.push('\n');
-            fence.push_str(dedent(line, open.indent));
             if closes(line, &open) {
+                // A closer indented 4+ spaces past the margin would not close.
+                fence.push_str(line.trim_start_matches([' ', '\t']));
                 closed = true;
                 break;
             }
+            fence.push_str(dedent(line, open.indent));
         }
         if !closed {
             fence.push('\n');
@@ -405,6 +407,17 @@ mod tests {
             ),
             ("~~~~\nx", "~~~~\nx\n~~~~"),
             ("```\r\n<a>\r\n```\r\nb", "```\r\n<a>\r\n```\r\nb"),
+        ]);
+    }
+
+    #[test]
+    fn over_indented_closer_still_closes() {
+        check(&[
+            (
+                "```\ncode\n    ```\nafter <x>",
+                "```\ncode\n```\nafter &lt;x&gt;",
+            ),
+            ("```\nx\n\t```\ny", "```\nx\n```\ny"),
         ]);
     }
 
