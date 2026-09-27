@@ -172,63 +172,21 @@ fn trim_blank<'a>(lines: &'a [&'a str]) -> &'a [&'a str] {
     &lines[start..end]
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum Line {
-    Blank,
-    Underline,
-    BlockStart,
-    Text,
-}
-
+/// Code spans are matched within a line. A span crossing lines could run past
+/// a block CommonMark ends first, such as an HTML block, and copy it raw.
 fn prose(lines: &[&str]) -> String {
-    let classes = classify(lines);
     let mut out = String::new();
-    let mut i = 0;
-    while i < lines.len() {
+    for (i, line) in lines.iter().enumerate() {
         if i > 0 {
             out.push('\n');
         }
-        match classes[i] {
-            Line::Blank => {
-                out.push_str(lines[i]);
-                i += 1;
-            }
-            Line::Underline => {
-                out.push_str(&underline(lines[i]));
-                i += 1;
-            }
-            Line::BlockStart | Line::Text => {
-                // A code span cannot cross into the next block.
-                let end = i
-                    + 1
-                    + classes[i + 1..]
-                        .iter()
-                        .take_while(|&&c| c == Line::Text)
-                        .count();
-                inline(&lines[i..end].join("\n"), &mut out);
-                i = end;
-            }
+        if i > 0 && !lines[i - 1].trim().is_empty() && is_underline(line) {
+            out.push_str(&underline(line));
+        } else {
+            inline(line, &mut out);
         }
     }
     out
-}
-
-fn classify(lines: &[&str]) -> Vec<Line> {
-    lines
-        .iter()
-        .enumerate()
-        .map(|(i, line)| {
-            if line.trim().is_empty() {
-                Line::Blank
-            } else if i > 0 && !lines[i - 1].trim().is_empty() && is_underline(line) {
-                Line::Underline
-            } else if is_block_start(line) {
-                Line::BlockStart
-            } else {
-                Line::Text
-            }
-        })
-        .collect()
 }
 
 fn is_underline(line: &str) -> bool {
@@ -246,28 +204,6 @@ fn underline(line: &str) -> String {
     } else {
         format!("\\{run}")
     }
-}
-
-fn is_block_start(line: &str) -> bool {
-    let body = line.trim_start_matches([' ', '\t']);
-    let hashes = run_len(body, '#');
-    if (1..=6).contains(&hashes) {
-        return body[hashes..]
-            .chars()
-            .next()
-            .is_none_or(|c| c == ' ' || c == '\t');
-    }
-    if body.starts_with('>') {
-        return true;
-    }
-    if let Some(rest) = body.strip_prefix(['-', '*', '+']) {
-        return rest.starts_with([' ', '\t']);
-    }
-    let digits = body.len() - body.trim_start_matches(|c: char| c.is_ascii_digit()).len();
-    digits > 0
-        && body[digits..]
-            .strip_prefix(['.', ')'])
-            .is_some_and(|rest| rest.starts_with([' ', '\t']))
 }
 
 fn inline(text: &str, out: &mut String) {
@@ -547,15 +483,21 @@ mod tests {
     }
 
     #[test]
-    fn code_spans_stop_at_block_boundaries() {
+    fn code_spans_stay_on_one_line() {
         check(&[
             ("a ` b\n---\n<x>`", "a ` b\n<hr>\n&lt;x&gt;`"),
             ("a ` b\n# H <x> `", "a ` b\n# H &lt;x&gt; `"),
             ("a ` b\n- item <x> `", "a ` b\n- item &lt;x&gt; `"),
             ("a ` b\n2) item <x> `", "a ` b\n2) item &lt;x&gt; `"),
             ("a ` b\n> q <x> `", "a ` b\n&gt; q &lt;x&gt; `"),
-            // Within one paragraph a span may cross a line break.
-            ("a `x\n<y>` b", "a `x\n<y>` b"),
+            ("# H `\n<task>`", "# H `\n&lt;task&gt;`"),
+            (
+                "before `\n<div>\n</div>\n`",
+                "before `\n&lt;div&gt;\n&lt;/div&gt;\n`",
+            ),
+            ("a ` b\n***\n<x> `", "a ` b\n***\n&lt;x&gt; `"),
+            // A span wrapped across lines shows its escapes, but hides nothing.
+            ("a `x\n<y>` b", "a `x\n&lt;y&gt;` b"),
             ("a ``x ` <y>`` <z>", "a ``x ` <y>`` &lt;z&gt;"),
         ]);
     }
