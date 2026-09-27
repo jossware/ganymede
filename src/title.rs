@@ -33,6 +33,34 @@ fn truncate(s: &str) -> String {
     format!("{}...", s[..cut].trim_end_matches(' '))
 }
 
+const MAX_SLUG_LEN: usize = 50;
+
+pub fn slug(source: Option<&str>) -> String {
+    derive(source).map(|t| slugify(&t)).unwrap_or_default()
+}
+
+fn slugify(s: &str) -> String {
+    let mut out = String::new();
+    for c in s.chars() {
+        // ASCII-only lowercasing keeps non-ASCII letters out of the slug.
+        let c = c.to_ascii_lowercase();
+        if c.is_ascii_alphanumeric() {
+            out.push(c);
+        } else if !out.is_empty() && !out.ends_with('-') {
+            out.push('-');
+        }
+    }
+    let out = out.trim_matches('-');
+    if out.len() <= MAX_SLUG_LEN {
+        return out.to_string();
+    }
+    let mut clipped = &out[..MAX_SLUG_LEN];
+    if let Some(hyphen) = clipped.rfind('-').filter(|&i| i > 0) {
+        clipped = &clipped[..hyphen];
+    }
+    clipped.trim_matches('-').to_string()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -94,5 +122,52 @@ mod tests {
     fn long_token_cuts_at_a_char_boundary() {
         let long = format!("{}éb", "a".repeat(79));
         assert_eq!(title(Some(&long)), format!("{}...", "a".repeat(79)));
+    }
+
+    #[test]
+    fn slug_cases() {
+        for (source, want) in [
+            ("", ""),
+            ("hello world", "hello-world"),
+            ("Fix the bug — now!", "fix-the-bug-now"),
+            ("already-a-slug", "already-a-slug"),
+            ("---foo---bar---", "foo-bar"),
+            ("café résumé", "caf-r-sum"),
+            ("ship it 🚢🚢🚢", "ship-it"),
+            ("!@#$%^&*()", ""),
+            (
+                "alpha beta gamma delta epsilon zeta eta theta iota kappa lambda",
+                "alpha-beta-gamma-delta-epsilon-zeta-eta-theta",
+            ),
+            // Unicode lowercasing maps KELVIN SIGN to ASCII `k`.
+            ("\u{212A} \u{212A} \u{212A}", ""),
+            ("修正してください", ""),
+        ] {
+            assert_eq!(slug(Some(source)), want, "{source:?}");
+        }
+    }
+
+    #[test]
+    fn slug_follows_the_derived_title() {
+        assert_eq!(
+            slug(Some("Projects/demo/Rename the sample config loader.md")),
+            "rename-the-sample-config-loader"
+        );
+        assert_eq!(slug(Some(".md")), "md");
+        assert_eq!(slug(Some("foo/.md")), "");
+        assert_eq!(slug(None), "");
+    }
+
+    #[test]
+    fn truncated_title_slug_has_no_trailing_hyphen() {
+        let long = "fix the thing!!! ".repeat(8);
+        assert!(title(Some(&long)).ends_with("..."));
+        let s = slug(Some(&long));
+        assert!(!s.ends_with('-') && s.len() <= 50, "{s:?}");
+    }
+
+    #[test]
+    fn non_ascii_title_is_kept_with_an_empty_slug() {
+        assert_eq!(title(Some("修正してください")), "修正してください");
     }
 }
