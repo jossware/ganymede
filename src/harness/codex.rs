@@ -468,19 +468,21 @@ fn strip_browser_context(text: &str) -> String {
 }
 
 /// The section runs to the first blank line followed by a non-entry line.
+/// Without that boundary the section cannot be told apart from a request
+/// that looks like an entry, so nothing is stripped rather than everything.
 fn strip_files_section(text: &str) -> String {
     let lines: Vec<&str> = text.lines().collect();
     let Some(start) = lines.iter().position(|l| l.trim() == FILES_HEADING) else {
         return text.to_string();
     };
-    let end = (start + 1..lines.len())
-        .find(|&i| {
-            lines[i].trim().is_empty()
-                && lines
-                    .get(i + 1)
-                    .is_some_and(|next| !next.trim().is_empty() && !is_file_entry(next))
-        })
-        .unwrap_or(lines.len());
+    let Some(end) = (start + 1..lines.len()).find(|&i| {
+        lines[i].trim().is_empty()
+            && lines
+                .get(i + 1)
+                .is_some_and(|next| !next.trim().is_empty() && !is_file_entry(next))
+    }) else {
+        return text.to_string();
+    };
     lines[..start]
         .iter()
         .chain(&lines[end..])
@@ -833,6 +835,13 @@ mod tests {
                 format!("\n# Files mentioned by the user:\n\n## a.md: /x/a.md\n\n{request}\n");
             assert_eq!(clean_user_text(&text), request);
         }
+    }
+
+    #[test]
+    fn clean_keeps_everything_when_files_section_has_no_end() {
+        let text =
+            "\n# Files mentioned by the user:\n\n## a.md: /x/a.md\n\n## Endpoint: /api/users\n";
+        assert_eq!(clean_user_text(text), text.trim());
     }
 
     #[test]
