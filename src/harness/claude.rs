@@ -95,10 +95,17 @@ pub fn is_ignored_record(record: &Value) -> bool {
 
 pub fn parse(records: &Records, session: &mut Session) -> Result<(), LoadError> {
     let mut walk = Walk::default();
+    let mut session_id_seen = false;
+    let mut sidechain_id = None;
     for record in &records.values {
+        let id = non_empty(record, "sessionId");
+        session_id_seen |= id.is_some();
         // Subagent output reaches the main thread through tool results and
         // task notifications.
         if flag(record, "isSidechain") {
+            if sidechain_id.is_none() {
+                sidechain_id = id.map(String::from);
+            }
             continue;
         }
         metadata(record, session);
@@ -110,8 +117,14 @@ pub fn parse(records: &Records, session: &mut Session) -> Result<(), LoadError> 
             t => session.record_unhandled(&format!("record/{t}"), 1),
         }
     }
-    if session.id.is_empty() {
+    if !session_id_seen {
         return Err(LoadError::Parse("missing sessionId".into()));
+    }
+    // A sidechain-only file has no non-sidechain record to carry it.
+    if session.id.is_empty()
+        && let Some(id) = sidechain_id
+    {
+        session.id = id;
     }
     Ok(())
 }
@@ -367,7 +380,7 @@ fn result_text(block: &Value, session: &mut Session) -> String {
         Some(Value::Array(parts)) => parts
             .iter()
             .filter_map(|part| match str_at(part, "type").unwrap_or_default() {
-                "text" => Some(str_at(part, "text").unwrap_or_default().to_string()),
+                "text" => str_at(part, "text").map(String::from),
                 "image" => Some("[image]".to_string()),
                 "tool_reference" => None,
                 t => {
@@ -381,7 +394,6 @@ fn result_text(block: &Value, session: &mut Session) -> String {
     }
 }
 
-/// The display name and summary for a tool call.
 fn tool_label(name: &str, input: &Value) -> (String, String) {
     if let Some((server, tool)) = mcp_name(name) {
         let summary = if input.is_null() {
@@ -573,13 +585,13 @@ fn non_blank<'a>(v: &'a Value, path: &str) -> Option<&'a str> {
 mod tests {
     use std::collections::BTreeMap;
     use std::fs;
+    use std::io::Write;
     use std::path::{Path, PathBuf};
 
     use serde_json::json;
 
     use super::*;
     use crate::harness::{Harness, Loaded, load};
-    use crate::session::Entry;
 
     fn fixture_path(name: &str) -> PathBuf {
         Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -912,7 +924,6 @@ mod tests {
         );
     }
 
-    // cc2md: ExtractMetadata_BasicFields
     #[test]
     fn metadata_basic_fields() {
         let s = parse_all(&[user(json!("hello"))]);
@@ -923,7 +934,6 @@ mod tests {
         assert_eq!(s.started_at.unwrap().to_string(), "2025-01-01T00:00:00Z");
     }
 
-    // cc2md: ExtractMetadata_ModelFromAssistant, plus the <synthetic> decision.
     #[test]
     fn model_from_first_real_assistant() {
         let mut synthetic = assistant(json!([text("Spend limit reached")]));
@@ -944,13 +954,12 @@ mod tests {
         );
     }
 
-    // cc2md: ExtractMetadata_DefaultModel. Changed: None, not "unknown".
+    // None, not "unknown", when there is no assistant record.
     #[test]
     fn model_absent_without_assistant() {
         assert_eq!(parse_all(&[user(json!("hi"))]).model, None);
     }
 
-    // cc2md: ExtractMetadata_FirstNonEmptyValues
     #[test]
     fn metadata_takes_first_non_empty_values() {
         let mut first = user(json!("a"));
@@ -982,7 +991,26 @@ mod tests {
         );
     }
 
-    // cc2md: BuildTurns_UserStringContent
+    #[test]
+    fn sidechain_only_file_loads_as_empty() {
+        let mut side_user = user(json!("hidden"));
+        side_user["isSidechain"] = json!(true);
+        let mut side_assistant = assistant(json!([text("also hidden")]));
+        side_assistant["isSidechain"] = json!(true);
+
+        let s = try_parse(&[side_user.clone(), side_assistant.clone()]).unwrap();
+        assert!(s.entries.is_empty());
+
+        let jsonl = [side_user, side_assistant]
+            .iter()
+            .map(Value::to_string)
+            .collect::<Vec<_>>()
+            .join("\n");
+        let mut f = tempfile::NamedTempFile::new().unwrap();
+        f.write_all(jsonl.as_bytes()).unwrap();
+        assert!(matches!(load(f.path(), None, false), Ok(Loaded::Empty)));
+    }
+
     #[test]
     fn user_string_content() {
         assert_eq!(
@@ -991,7 +1019,6 @@ mod tests {
         );
     }
 
-    // cc2md: BuildTurns_SkipEmptyString, FormatUserTurn_EmptyForWhitespaceOnly
     #[test]
     fn blank_user_content_has_no_entry() {
         assert!(
@@ -1001,7 +1028,6 @@ mod tests {
         );
     }
 
-    // cc2md: BuildTurns_AssistantTextBlocks, BuildTurns_ThinkingBlocks
     #[test]
     fn assistant_text_and_thinking() {
         let s = parse_all(&[assistant(json!([
@@ -1014,7 +1040,6 @@ mod tests {
         );
     }
 
-    // cc2md: BuildTurns_SkipEmptyTextAndThinking, BuildTurns_SkipEmptyAssistant
     #[test]
     fn blank_text_and_thinking_are_dropped() {
         let s = parse_all(&[
@@ -1030,8 +1055,7 @@ mod tests {
         assert!(s.unhandled.is_empty());
     }
 
-    // cc2md: BuildTurns_MergeConsecutiveAssistant. Changed: no merging; the
-    // renderer groups runs.
+    // No merging: the renderer groups runs.
     #[test]
     fn consecutive_assistant_records_stay_separate() {
         let s = parse_all(&[
@@ -1041,7 +1065,6 @@ mod tests {
         assert_eq!(lines(&s), ["assistant: Part 1", "assistant: Part 2"]);
     }
 
-    // cc2md: BuildTurns_NoMergeWhenSeparatedByUser
     #[test]
     fn user_turn_separates_assistant_records() {
         let s = parse_all(&[
@@ -1055,7 +1078,6 @@ mod tests {
         );
     }
 
-    // cc2md: ReadSessionFile_SkipsMetaLines, plus sidechains.
     #[test]
     fn meta_and_sidechain_records_are_skipped() {
         let mut meta = user(json!("hidden"));
@@ -1068,7 +1090,6 @@ mod tests {
         assert_eq!(s.cwds, [PathBuf::from("/project")]);
     }
 
-    // cc2md: ReadSessionFile_ValidLines, ReadSessionFile_SkipsFilteredTypes
     #[test]
     fn ignored_records_are_silent() {
         let s = parse_all(&[
@@ -1082,8 +1103,6 @@ mod tests {
         assert!(s.unhandled.is_empty(), "{:?}", s.unhandled);
     }
 
-    // cc2md: FormatUserTurn_StripSystemReminder, _StripLocalCommandCaveat,
-    // _StripCommandMessage
     #[test]
     fn injected_tags_are_stripped() {
         for (input, want) in [
@@ -1101,11 +1120,14 @@ mod tests {
             ),
             ("before <system-reminder>unclosed", "before"),
         ] {
-            assert_eq!(clean_user_text(input), want, "{input}");
+            assert_eq!(
+                lines(&parse_all(&[user(json!(input))])),
+                [format!("user: {want}")],
+                "{input}"
+            );
         }
     }
 
-    // cc2md: FormatUserTurn_EmptyWhenOnlyTags
     #[test]
     fn reminder_only_message_has_no_entry() {
         let s = parse_all(&[user(json!("<system-reminder>only tags</system-reminder>"))]);
@@ -1251,7 +1273,6 @@ mod tests {
         );
     }
 
-    // cc2md: BuildTurns_ToolLinking
     #[test]
     fn tool_use_pairs_with_result() {
         let s = parse_all(&[
@@ -1265,7 +1286,6 @@ mod tests {
         assert_eq!(lines(&s), [r#"tool: Bash [ls] Some("file.txt")"#]);
     }
 
-    // cc2md: BuildTurns_ToolResultArrayContent, plus the other block kinds.
     #[test]
     fn result_blocks_join_with_newlines() {
         let s = parse_all(&[
@@ -1291,7 +1311,19 @@ mod tests {
         );
     }
 
-    // cc2md: BuildTurns_ToolResultNoContent. Changed: None, not "".
+    #[test]
+    fn text_block_without_text_field_is_skipped() {
+        let s = parse_all(&[
+            assistant(json!([tool_use("tool-1", "Read", json!({}))])),
+            user(json!([tool_result(
+                "tool-1",
+                json!([text("a"), {"type": "text"}, text("b")])
+            )])),
+        ]);
+        assert_eq!(lines(&s), [r#"tool: Read [] Some("a\nb")"#]);
+    }
+
+    // None, not an empty string, when the result has no content.
     #[test]
     fn empty_result_is_none() {
         let s = parse_all(&[
@@ -1303,7 +1335,6 @@ mod tests {
         assert_eq!(lines(&s), ["tool: Bash [] None", "tool: Bash [] None"]);
     }
 
-    // cc2md: BuildTurns_ErrorResults
     #[test]
     fn is_error_sets_failed() {
         let mut result = tool_result("tool-1", json!("error msg"));
@@ -1315,7 +1346,6 @@ mod tests {
         assert_eq!(lines(&s), [r#"tool: Bash [] Some("error msg") failed"#]);
     }
 
-    // cc2md: BuildTurns_UserTextAlongsideToolResults
     #[test]
     fn user_text_alongside_results() {
         let s = parse_all(&[
@@ -1331,7 +1361,7 @@ mod tests {
         );
     }
 
-    // cc2md: BuildTurns_RealisticConversation. Changed: entries stay in file order.
+    // Entries stay in file order.
     #[test]
     fn realistic_conversation_keeps_file_order() {
         let s = parse_all(&[
