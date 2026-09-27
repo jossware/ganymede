@@ -1,3 +1,5 @@
+use std::path::{Path, PathBuf};
+
 use jiff::Timestamp;
 use serde_json::Value;
 
@@ -39,6 +41,9 @@ const IGNORED_ITEMS: &[&str] = &[
 
 /// Early CLI rollouts predate `item_completed` and are not supported.
 const LEGACY_ORIGINATOR: &str = "codex_cli_rs";
+
+/// Fronts Codex's connectors; its tool names already name the connector.
+const APPS_SERVER: &str = "codex_apps";
 
 const REQUEST_MARKER: &str = "## My request:";
 const FILES_HEADING: &str = "# Files mentioned by the user:";
@@ -100,6 +105,7 @@ pub fn parse(records: &Records, session: &mut Session) -> Result<(), LoadError> 
         session.add_cwd(cwd.into());
     }
 
+    let mut turn_cwd: Option<PathBuf> = session.cwds.first().cloned();
     let mut items = 0;
     for record in records.values.iter().skip(1) {
         let ts = timestamp_at(record, "timestamp");
@@ -107,6 +113,7 @@ pub fn parse(records: &Records, session: &mut Session) -> Result<(), LoadError> 
             "turn_context" => {
                 if let Some(cwd) = str_at(record, "payload.cwd") {
                     session.add_cwd(cwd.into());
+                    turn_cwd = Some(cwd.into());
                 }
                 if session.model.is_none() {
                     session.model = str_at(record, "payload.model").map(String::from);
@@ -116,7 +123,7 @@ pub fn parse(records: &Records, session: &mut Session) -> Result<(), LoadError> 
                 "item_completed" => {
                     items += 1;
                     let item = at(record, "payload.item").unwrap_or(&Value::Null);
-                    map_item(item, ts, session);
+                    map_item(item, ts, turn_cwd.as_deref(), session);
                 }
                 t if IGNORED_EVENTS.contains(&t) => {}
                 t => session.record_unhandled(&format!("event/{t}"), 1),
@@ -136,10 +143,18 @@ pub fn parse(records: &Records, session: &mut Session) -> Result<(), LoadError> 
     Ok(())
 }
 
-fn map_item(item: &Value, ts: Option<Timestamp>, session: &mut Session) {
+fn map_item(
+    item: &Value,
+    ts: Option<Timestamp>,
+    turn_cwd: Option<&Path>,
+    session: &mut Session,
+) {
     let entry = match str_at(item, "type").unwrap_or_default() {
         "UserMessage" => user_message(item, ts, session),
         "AgentMessage" => agent_message(item, ts, session),
+        "CommandExecution" => Some(command_execution(item, ts)),
+        "FileChange" => Some(file_change(item, ts, turn_cwd)),
+        "McpToolCall" => Some(mcp_tool_call(item, ts)),
         t if IGNORED_ITEMS.contains(&t) => None,
         t => {
             session.record_unhandled(&format!("item/{t}"), 1);
@@ -147,6 +162,101 @@ fn map_item(item: &Value, ts: Option<Timestamp>, session: &mut Session) {
         }
     };
     session.entries.extend(entry);
+}
+
+fn tool(
+    item: &Value,
+    ts: Option<Timestamp>,
+    name: String,
+    summary: String,
+    output: String,
+    failed: bool,
+) -> Entry {
+    Entry::Tool {
+        at: ts,
+        name,
+        summary,
+        output: (!output.is_empty()).then_some(output),
+        failed: failed || str_at(item, "status") == Some("failed"),
+    }
+}
+
+fn command_execution(item: &Value, ts: Option<Timestamp>) -> Entry {
+    let summary = match at(item, "command") {
+        Some(Value::String(s)) => s.clone(),
+        _ => command_summary(array_at(item, "command")),
+    };
+    let nonzero = at(item, "exit_code")
+        .and_then(Value::as_i64)
+        .is_some_and(|c| c != 0);
+    let output = str_at(item, "aggregated_output")
+        .unwrap_or_default()
+        .to_string();
+    tool(item, ts, "Shell".into(), summary, output, nonzero)
+}
+
+/// A shell wrapper's script is the interesting part of its argv.
+fn command_summary(argv: &[Value]) -> String {
+    let args: Vec<&str> = argv.iter().filter_map(Value::as_str).collect();
+    match args.iter().position(|a| matches!(*a, "-lc" | "-c")) {
+        Some(i) if i + 1 < args.len() => args[i + 1].to_string(),
+        _ => args.join(" "),
+    }
+}
+
+fn file_change(item: &Value, ts: Option<Timestamp>, turn_cwd: Option<&Path>) -> Entry {
+    let mut summary = Vec::new();
+    let mut output = String::new();
+    if let Some(changes) = at(item, "changes").and_then(Value::as_object) {
+        for (path, change) in changes {
+            let kind = str_at(change, "type").unwrap_or("change");
+            let shown = relative(path, turn_cwd);
+            summary.push(match str_at(change, "move_path") {
+                Some(to) => format!("{kind} {shown} → {}", relative(to, turn_cwd)),
+                None => format!("{kind} {shown}"),
+            });
+            let body = str_at(change, "unified_diff")
+                .or_else(|| str_at(change, "content"))
+                .unwrap_or_default();
+            if !body.is_empty() {
+                output.push_str(&format!("{shown}:\n{body}"));
+                if !body.ends_with('\n') {
+                    output.push('\n');
+                }
+            }
+        }
+    }
+    if str_at(item, "status") == Some("failed") {
+        output.push_str(str_at(item, "stderr").unwrap_or_default());
+    }
+    tool(item, ts, "Edit".into(), summary.join(", "), output, false)
+}
+
+fn relative(path: &str, cwd: Option<&Path>) -> String {
+    cwd.and_then(|cwd| Path::new(path).strip_prefix(cwd).ok())
+        .filter(|p| !p.as_os_str().is_empty())
+        .map_or_else(|| path.to_string(), |p| p.display().to_string())
+}
+
+fn mcp_tool_call(item: &Value, ts: Option<Timestamp>) -> Entry {
+    let server = str_at(item, "server").unwrap_or_default();
+    let name = str_at(item, "tool").unwrap_or_default();
+    let name = if server.is_empty() || server == APPS_SERVER {
+        name.to_string()
+    } else {
+        format!("{server}.{name}")
+    };
+    let summary = at(item, "arguments")
+        .filter(|a| !a.is_null())
+        .map(Value::to_string)
+        .unwrap_or_default();
+    let output = array_at(item, "result.content")
+        .iter()
+        .filter_map(|b| str_at(b, "text"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let is_error = at(item, "result.isError").and_then(Value::as_bool) == Some(true);
+    tool(item, ts, name, summary, output, is_error)
 }
 
 fn user_message(item: &Value, ts: Option<Timestamp>, session: &mut Session) -> Option<Entry> {
@@ -275,6 +385,7 @@ mod tests {
     use super::*;
     use crate::harness::{Harness, Loaded, load};
     use crate::session::Entry;
+    use serde_json::json;
 
     fn fixture_path(name: &str) -> PathBuf {
         Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -560,5 +671,112 @@ mod tests {
     #[test]
     fn clean_leaves_plain_text() {
         assert_eq!(clean_user_text("  plain\n\ntext  "), "plain\n\ntext");
+    }
+
+    type ToolView<'a> = (&'a str, &'a str, Option<&'a str>, bool);
+
+    fn tools(s: &Session) -> Vec<ToolView<'_>> {
+        s.entries
+            .iter()
+            .filter_map(|e| match e {
+                Entry::Tool {
+                    name,
+                    summary,
+                    output,
+                    failed,
+                    ..
+                } => Some((name.as_str(), summary.as_str(), output.as_deref(), *failed)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn map_one(item: Value) -> Session {
+        let mut s = Session::new(Harness::Codex, "t.jsonl".into());
+        map_item(&item, None, None, &mut s);
+        s
+    }
+
+    #[test]
+    fn tui_tools_with_native_failure_signals() {
+        let s = session("tui.jsonl");
+        assert_eq!(
+            tools(&s),
+            [
+                ("Shell", r#"rg -n "clap" src"#, Some("src/cli.rs:1:use clap::Parser;\n"), false),
+                ("Shell", "cargo test --quiet", Some("error[E0425]: cannot find value `verbose`\n"), true),
+                ("Shell", "false", None, true),
+                (
+                    "Edit",
+                    "update src/cli.rs, add tests/verbose.rs, delete src/old.rs",
+                    Some("src/cli.rs:\n@@ -1 +1,2 @@\n+    verbose: bool,\ntests/verbose.rs:\n#[test]\nfn verbose() {}\n"),
+                    false,
+                ),
+                ("Edit", "update README.md", Some("README.md:\n@@ -1 +1 @@\n"), true),
+                ("docs.search", r#"{"query":"clap verbose flag","max_results":3}"#, Some("Use ArgAction::Count."), false),
+                ("cua_repl.js", r#"{"code":"throw new Error()","title":"probe"}"#, None, true),
+            ]
+        );
+    }
+
+    #[test]
+    fn command_summary_unwraps_shell_scripts() {
+        let argv = |a: &[&str]| a.iter().map(|s| json!(s)).collect::<Vec<_>>();
+        assert_eq!(command_summary(&argv(&["/bin/zsh", "-lc", "ls -la"])), "ls -la");
+        assert_eq!(command_summary(&argv(&["bash", "-c", "x"])), "x");
+        assert_eq!(command_summary(&argv(&["cargo", "test"])), "cargo test");
+        assert_eq!(command_summary(&argv(&["sh", "-c"])), "sh -c");
+    }
+
+    #[test]
+    fn string_command_is_its_own_summary() {
+        let s = map_one(json!({"type": "CommandExecution", "command": "ls -la", "exit_code": 0}));
+        assert_eq!(tools(&s), [("Shell", "ls -la", None, false)]);
+    }
+
+    #[test]
+    fn fieldless_tool_items_degrade() {
+        for (item, name) in [
+            (json!({"type": "CommandExecution"}), "Shell"),
+            (json!({"type": "FileChange", "changes": "oops"}), "Edit"),
+            (json!({"type": "McpToolCall"}), ""),
+        ] {
+            let s = map_one(item);
+            assert_eq!(tools(&s), [(name, "", None, false)]);
+        }
+    }
+
+    #[test]
+    fn apps_server_is_dropped_from_mcp_names() {
+        let s = map_one(json!({
+            "type": "McpToolCall", "server": "codex_apps", "tool": "github.fetch_file",
+            "arguments": {"path": "README.md"}, "status": "completed",
+            "result": {"content": [{"type": "text", "text": "not found"}], "isError": true},
+        }));
+        assert_eq!(
+            tools(&s),
+            [("github.fetch_file", r#"{"path":"README.md"}"#, Some("not found"), true)]
+        );
+    }
+
+    #[test]
+    fn failed_file_change_appends_stderr() {
+        let s = map_one(json!({
+            "type": "FileChange", "status": "failed", "stderr": "no parent dir",
+            "changes": {"/a/b.rs": {"type": "add", "content": "x\n"}},
+        }));
+        assert_eq!(
+            tools(&s),
+            [("Edit", "add /a/b.rs", Some("/a/b.rs:\nx\nno parent dir"), true)]
+        );
+    }
+
+    #[test]
+    fn relative_paths() {
+        let cwd = Some(Path::new("/a/b"));
+        assert_eq!(relative("/a/b/c.rs", cwd), "c.rs");
+        assert_eq!(relative("/x/y.rs", cwd), "/x/y.rs");
+        assert_eq!(relative("/a/b", cwd), "/a/b");
+        assert_eq!(relative("/a/b/c.rs", None), "/a/b/c.rs");
     }
 }
