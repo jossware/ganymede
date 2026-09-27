@@ -42,6 +42,8 @@ const IGNORED_ITEMS: &[&str] = &[
 /// Early CLI rollouts predate `item_completed` and are not supported.
 const LEGACY_ORIGINATOR: &str = "codex_cli_rs";
 
+const SHELLS: &[&str] = &["sh", "bash", "zsh", "dash", "ksh", "fish"];
+
 /// Fronts Codex's connectors; its tool names already name the connector.
 const APPS_SERVER: &str = "codex_apps";
 
@@ -217,13 +219,22 @@ fn command_execution(item: &Value, ts: Option<Timestamp>) -> Entry {
     tool(item, ts, "Shell".into(), summary, output, nonzero)
 }
 
-/// A shell wrapper's script is the interesting part of its argv.
+/// A shell wrapper's script is the interesting part of its argv. Other
+/// commands have their own `-c` (`git -c key=value`), so only a shell unwraps.
 fn command_summary(argv: &[Value]) -> String {
     let args: Vec<&str> = argv.iter().filter_map(Value::as_str).collect();
-    match args.iter().position(|a| matches!(*a, "-lc" | "-c")) {
-        Some(i) if i + 1 < args.len() => args[i + 1].to_string(),
+    match args.as_slice() {
+        [shell, "-lc" | "-c", script, ..] if is_shell(shell) => script.to_string(),
         _ => args.join(" "),
     }
+}
+
+fn is_shell(program: &str) -> bool {
+    let name = Path::new(program)
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or(program);
+    SHELLS.contains(&name)
 }
 
 fn file_change(item: &Value, ts: Option<Timestamp>, turn_cwd: Option<&Path>) -> Entry {
@@ -928,6 +939,14 @@ mod tests {
         assert_eq!(command_summary(&argv(&["bash", "-c", "x"])), "x");
         assert_eq!(command_summary(&argv(&["cargo", "test"])), "cargo test");
         assert_eq!(command_summary(&argv(&["sh", "-c"])), "sh -c");
+        assert_eq!(
+            command_summary(&argv(&["git", "-c", "color.ui=false", "status"])),
+            "git -c color.ui=false status"
+        );
+        assert_eq!(
+            command_summary(&argv(&["/usr/bin/env", "bash", "-c", "x"])),
+            "/usr/bin/env bash -c x"
+        );
     }
 
     #[test]
