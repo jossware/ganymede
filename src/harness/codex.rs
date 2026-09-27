@@ -155,6 +155,24 @@ fn map_item(
         "CommandExecution" => Some(command_execution(item, ts)),
         "FileChange" => Some(file_change(item, ts, turn_cwd)),
         "McpToolCall" => Some(mcp_tool_call(item, ts)),
+        "Reasoning" => reasoning(item).map(|text| Entry::Thinking { at: ts, text }),
+        "WebSearch" => Some(web_search(item, ts)),
+        "ImageView" => {
+            let path = file_path(str_at(item, "path").unwrap_or_default());
+            Some(tool(item, ts, "ImageView".into(), path, String::new(), false))
+        }
+        "Plan" => Some(plan(item, ts)),
+        "CollabAgentToolCall" => {
+            let summary = str_at(item, "tool").unwrap_or_default().to_string();
+            Some(tool(
+                item,
+                ts,
+                "CollabAgentToolCall".into(),
+                summary,
+                String::new(),
+                false,
+            ))
+        }
         t if IGNORED_ITEMS.contains(&t) => None,
         t => {
             session.record_unhandled(&format!("item/{t}"), 1);
@@ -257,6 +275,83 @@ fn mcp_tool_call(item: &Value, ts: Option<Timestamp>) -> Entry {
         .join("\n");
     let is_error = at(item, "result.isError").and_then(Value::as_bool) == Some(true);
     tool(item, ts, name, summary, output, is_error)
+}
+
+/// Most reasoning is encrypted, leaving both text fields empty.
+fn reasoning(item: &Value) -> Option<String> {
+    let summary = texts(array_at(item, "summary_text"));
+    let text = if summary.is_empty() {
+        texts(array_at(item, "raw_content"))
+    } else {
+        summary
+    };
+    (!text.is_empty()).then_some(text)
+}
+
+/// Joins text parts given either as strings or as `{"text": ...}` objects.
+fn texts(parts: &[Value]) -> String {
+    parts
+        .iter()
+        .filter_map(|p| p.as_str().or_else(|| str_at(p, "text")))
+        .filter(|t| !t.trim().is_empty())
+        .collect::<Vec<_>>()
+        .join("\n\n")
+}
+
+/// Opening a page leaves `query` empty.
+fn web_search(item: &Value, ts: Option<Timestamp>) -> Entry {
+    let summary = ["query", "action.query", "action.url"]
+        .iter()
+        .filter_map(|p| str_at(item, p))
+        .find(|s| !s.is_empty())
+        .unwrap_or_default();
+    tool(
+        item,
+        ts,
+        "WebSearch".into(),
+        summary.into(),
+        String::new(),
+        false,
+    )
+}
+
+fn plan(item: &Value, ts: Option<Timestamp>) -> Entry {
+    let text = str_at(item, "text").unwrap_or_default();
+    let summary = text
+        .lines()
+        .map(|l| l.trim_start_matches('#').trim())
+        .find(|l| !l.is_empty())
+        .unwrap_or_default();
+    tool(item, ts, "Plan".into(), summary.into(), text.into(), false)
+}
+
+fn file_path(uri: &str) -> String {
+    let path = uri.strip_prefix("file://").unwrap_or(uri);
+    let mut bytes = Vec::with_capacity(path.len());
+    let mut rest = path.as_bytes();
+    while let Some((&b, tail)) = rest.split_first() {
+        let decoded = match tail {
+            [hi, lo, ..] if b == b'%' => hex(*hi).zip(hex(*lo)).map(|(h, l)| (h << 4) | l),
+            _ => None,
+        };
+        match decoded {
+            Some(byte) => {
+                bytes.push(byte);
+                rest = &tail[2..];
+            }
+            None => {
+                bytes.push(b);
+                rest = tail;
+            }
+        }
+    }
+    String::from_utf8_lossy(&bytes).into_owned()
+}
+
+fn hex(b: u8) -> Option<u8> {
+    char::from(b)
+        .to_digit(16)
+        .and_then(|d| u8::try_from(d).ok())
 }
 
 fn user_message(item: &Value, ts: Option<Timestamp>, session: &mut Session) -> Option<Entry> {
@@ -778,5 +873,74 @@ mod tests {
         assert_eq!(relative("/x/y.rs", cwd), "/x/y.rs");
         assert_eq!(relative("/a/b", cwd), "/a/b");
         assert_eq!(relative("/a/b/c.rs", None), "/a/b/c.rs");
+    }
+
+    fn thinking(s: &Session) -> Vec<&str> {
+        s.entries
+            .iter()
+            .filter_map(|e| match e {
+                Entry::Thinking { text, .. } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn encrypted_reasoning_is_dropped() {
+        assert_eq!(thinking(&session("tui.jsonl")), ["Checking how flags are parsed"]);
+    }
+
+    #[test]
+    fn reasoning_falls_back_to_raw_content() {
+        let s = map_one(json!({
+            "type": "Reasoning", "summary_text": [],
+            "raw_content": [{"type": "reasoning_text", "text": "raw"}, "bare"],
+        }));
+        assert_eq!(thinking(&s), ["raw\n\nbare"]);
+    }
+
+    #[test]
+    fn desktop_tool_items() {
+        let s = session("desktop_chat.jsonl");
+        assert_eq!(
+            tools(&s),
+            [
+                ("WebSearch", "css flex header alignment", None, false),
+                ("WebSearch", "https://example.com/flexbox", None, false),
+                (
+                    "ImageView",
+                    "/Users/user/Documents/Codex/2026-09-15/sample-chat/outputs/header.png",
+                    None,
+                    false,
+                ),
+                ("Plan", "1. Inspect header CSS", Some("1. Inspect header CSS\n2. Fix alignment"), false),
+                ("CollabAgentToolCall", "spawn_agent", None, false),
+            ]
+        );
+    }
+
+    #[test]
+    fn web_search_uses_action_query() {
+        let s = map_one(json!({"type": "WebSearch", "query": "", "action": {"type": "search", "query": "rust"}}));
+        assert_eq!(tools(&s), [("WebSearch", "rust", None, false)]);
+    }
+
+    #[test]
+    fn plan_summary_drops_heading_marks() {
+        let s = map_one(json!({"type": "Plan", "text": "\n# Worktree plan\n\nBody"}));
+        assert_eq!(
+            tools(&s),
+            [("Plan", "Worktree plan", Some("\n# Worktree plan\n\nBody"), false)]
+        );
+    }
+
+    #[test]
+    fn file_uris_decode() {
+        assert_eq!(file_path("file:///a/b%20c.png"), "/a/b c.png");
+        assert_eq!(file_path("file:///a/it%E2%80%99s.png"), "/a/it’s.png");
+        assert_eq!(file_path("/x/100%"), "/x/100%");
+        assert_eq!(file_path("/x/%zz"), "/x/%zz");
+        assert_eq!(file_path("/x/%4"), "/x/%4");
+        assert_eq!(file_path("/plain"), "/plain");
     }
 }
