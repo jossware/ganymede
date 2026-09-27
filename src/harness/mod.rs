@@ -1,5 +1,6 @@
 mod claude;
 mod codex;
+mod json;
 
 use std::fmt;
 use std::fs;
