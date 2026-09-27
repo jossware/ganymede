@@ -21,7 +21,7 @@ default = "the parent issue's notes"
 
 [vars.checks]
 description = "Commands that MUST pass before the work is done."
-default = "direnv exec . cargo test and direnv exec . cargo clippy --all-targets -- -D warnings"
+default = "direnv exec . cargo fmt --check, direnv exec . cargo clippy --all-targets -- -D warnings, and direnv exec . cargo test"
 
 [vars.repo]
 description = "Forge repository for the pull request."
@@ -103,7 +103,7 @@ title = "{{name}}: squash merge"
 type = "task"
 priority = 1
 depends_on = ["codex-review"]
-description = "Squash-merge the PR once the user approves. Do not merge without explicit approval."
+description = "Squash-merge the PR once its CI / check is green and the user approves. Do not merge on a red or pending check, and do not merge without explicit approval."
 notes = """\
   Subject lowercase, imperative, 50 characters or fewer. \
   Then update local {{base}}, run {{checks}}, and close this epic. \
