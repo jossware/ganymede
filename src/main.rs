@@ -4,6 +4,8 @@ mod cli;
 mod harness;
 #[allow(dead_code)]
 mod session;
+#[allow(dead_code)]
+mod title;
 
 use std::process::ExitCode;
 
