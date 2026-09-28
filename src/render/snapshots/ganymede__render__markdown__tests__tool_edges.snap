@@ -1,0 +1,38 @@
+---
+source: src/render/markdown.rs
+expression: "body(&s, &opts)"
+---
+> **Claude**
+
+- **Glob**
+
+- **Bash** `` echo `x` ``
+
+  ```
+  ok
+  ```
+
+- **Read** `f.md`
+
+  `````
+  ````
+  code
+  `````
+
+- **Bash** `seq`
+
+  ```
+  1
+  2
+  ... (truncated)
+  ```
+
+- **Write** `w`
+
+- **Bash** `nl`
+
+  ```
+  out
+  ```
+
+- **Agent** (failed)

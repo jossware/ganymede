@@ -71,7 +71,7 @@ fn prose(text: &str) -> String {
     escape::markdown(text).trim_matches('\n').to_string()
 }
 
-fn tool(name: &str, summary: &str, _output: Option<&str>, failed: bool, _opts: &Options) -> String {
+fn tool(name: &str, summary: &str, output: Option<&str>, failed: bool, opts: &Options) -> String {
     let mut line = format!("- **{name}**");
     let span = escape::code_span(summary);
     if !span.is_empty() {
@@ -81,7 +81,28 @@ fn tool(name: &str, summary: &str, _output: Option<&str>, failed: bool, _opts: &
     if failed {
         line.push_str(" (failed)");
     }
-    line
+    let Some(output) = output.filter(|_| opts.tool_output) else {
+        return line;
+    };
+    let output = escape::truncate_lines(output, opts.max_lines);
+    let output = output.trim_end_matches(['\n', '\r']);
+    if output.is_empty() {
+        return line;
+    }
+    let fence = escape::fence_for(output);
+    // Indented, the fence stays inside the list item and the tools stay one list.
+    let block = format!("{fence}\n{output}\n{fence}")
+        .split('\n')
+        .map(|l| {
+            if l.is_empty() {
+                String::new()
+            } else {
+                format!("  {l}")
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    format!("{line}\n\n{block}")
 }
 
 fn callout(entry: &Entry, opts: &Options) -> String {
@@ -243,5 +264,107 @@ mod tests {
             ..opts()
         };
         insta::assert_snapshot!("thinking_only_run", body(&s, &opts));
+    }
+
+    fn basic() -> Session {
+        let mut s = Session::new(
+            Harness::Claude,
+            "/Users/user/.claude/projects/sample/basic.jsonl".into(),
+        );
+        s.id = "5f0c2a1e-7b3d-4c9a-9e21-3d4b5a6c7d8e".into();
+        s.harness_version = Some("2.1.259".into());
+        s.model = Some("claude-fable-5-1".into());
+        s.started_at = ts("2026-09-04T02:25:00Z");
+        s.title_source = Some("Add a greeting to the sample CLI".into());
+        s.cc_version = Some("v2.1.259".into());
+        s.entries = vec![
+            user(
+                ts("2026-09-04T02:25:00Z"),
+                "Add a greeting to the sample CLI",
+            ),
+            thinking(
+                ts("2026-09-04T02:25:02.274Z"),
+                "The user wants a greeting. Look at main.rs first.",
+            ),
+            Entry::Tool {
+                at: ts("2026-09-04T02:25:04.548Z"),
+                name: "Read".into(),
+                summary: "/Users/user/Workspaces/sample/src/main.rs".into(),
+                output: Some("1\tfn main() {}\n".into()),
+                failed: false,
+            },
+            Entry::Tool {
+                at: ts("2026-09-04T02:25:06.822Z"),
+                name: "Bash".into(),
+                summary: "cargo test".into(),
+                output: Some("error: could not compile `sample`".into()),
+                failed: true,
+            },
+            Entry::Tool {
+                at: ts("2026-09-04T02:25:09.233Z"),
+                name: "Edit".into(),
+                summary: "/Users/user/Worktrees/sample/feature/src/main.rs".into(),
+                output: Some("The file has been updated.".into()),
+                failed: false,
+            },
+            assistant(
+                ts("2026-09-04T02:25:11.507Z"),
+                "Added a `println!` greeting. Tests failed to compile before the edit.",
+            ),
+        ];
+        s
+    }
+
+    #[test]
+    fn basic_note() {
+        let note = crate::render::note(&basic(), "sample", Some("feature"), &opts());
+        insta::assert_snapshot!("basic", note);
+    }
+
+    #[test]
+    fn hook_flags() {
+        let opts = Options {
+            thinking: false,
+            tool_output: false,
+            ..opts()
+        };
+        insta::assert_snapshot!("hook_flags", body(&basic(), &opts));
+    }
+
+    #[test]
+    fn tool_edges() {
+        let s = session(vec![
+            tool("Glob", "", None, false),
+            tool("Bash", "echo `x`", Some("ok"), false),
+            tool("Read", "f.md", Some("````\ncode"), false),
+            tool("Bash", "seq", Some("1\n2\n3\n4"), false),
+            tool("Write", "w", Some(""), false),
+            tool("Bash", "nl", Some("out\n\n"), false),
+            tool("Agent", "", None, true),
+        ]);
+        let opts = Options {
+            max_lines: 2,
+            ..opts()
+        };
+        insta::assert_snapshot!("tool_edges", body(&s, &opts));
+    }
+
+    #[test]
+    fn tool_output_without_limit() {
+        let s = session(vec![tool("Bash", "seq", Some("1\n2\n3\n4"), false)]);
+        let opts = Options {
+            max_lines: 0,
+            ..opts()
+        };
+        assert!(body(&s, &opts).contains("  1\n  2\n  3\n  4\n  ```"));
+    }
+
+    #[test]
+    fn tool_output_keeps_crlf_inside_the_fence() {
+        let s = session(vec![tool("Bash", "type", Some("a\r\nb\r\n"), false)]);
+        assert_eq!(
+            body(&s, &opts()),
+            "> **Claude**\n\n- **Bash** `type`\n\n  ```\n  a\r\n  b\n  ```\n"
+        );
     }
 }
