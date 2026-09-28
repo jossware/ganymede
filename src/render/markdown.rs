@@ -111,7 +111,7 @@ fn callout(entry: &Entry, opts: &Options) -> String {
         Entry::User { at, text } => ("NOTE", format!("**User**{}", label(*at, &opts.tz)), text),
         Entry::AgentReport { at, name, text } => (
             "TIP",
-            format!("**Agent: {name}**{}", label(*at, &opts.tz)),
+            format!("**Agent: {}**{}", escape::label(name), label(*at, &opts.tz)),
             text,
         ),
         _ => unreachable!("run entries are never callouts"),
@@ -382,6 +382,15 @@ mod tests {
         assert_eq!(
             body(&s, &opts),
             "> **Claude**\n\n- **Bash** `curl`\n\n  ```\n    0%\n   50%\n  100%\n  ... (truncated)\n  ```\n\n- **Bash** `ls`\n\n  ```\n  ok\n  ```\n"
+        );
+    }
+
+    #[test]
+    fn agent_name_stays_in_the_header() {
+        let s = session(vec![report(None, "a**b\n# heading", "rep")]);
+        assert_eq!(
+            body(&s, &opts()),
+            "> [!TIP]\n> **Agent: a\\*\\*b \\# heading**\n>\n> rep\n"
         );
     }
 }

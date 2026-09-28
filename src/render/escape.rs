@@ -58,6 +58,20 @@ pub fn code_span(text: &str) -> String {
     format!("{delimiter}{pad}{body}{pad}{delimiter}")
 }
 
+/// A name inside a one-line bold label. Every CommonMark and Obsidian marker
+/// is backslash-escaped, since a name has no formatting worth keeping.
+pub fn label(text: &str) -> String {
+    let collapsed = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    let mut out = String::with_capacity(collapsed.len());
+    for c in collapsed.chars() {
+        if "\\`*_[]<>#|~=%^$!".contains(c) {
+            out.push('\\');
+        }
+        out.push(c);
+    }
+    out
+}
+
 /// `max == 0` means no limit. A terminal newline does not start another line.
 pub fn truncate_lines(text: &str, max: usize) -> String {
     if max == 0 {
@@ -608,5 +622,13 @@ mod tests {
             blocks("are you sure it's not the @<task> tag?"),
             vec![p("are you sure it's not the @&lt;task&gt; tag?")],
         );
+    }
+
+    #[test]
+    fn label_is_one_line_with_punctuation_escaped() {
+        assert_eq!(label("Explore"), "Explore");
+        assert_eq!(label("fix\n# heading  now"), "fix \\# heading now");
+        assert_eq!(label("a*b_[[c]]"), "a\\*b\\_\\[\\[c\\]\\]");
+        assert_eq!(label("<x> `y` \\"), "\\<x\\> \\`y\\` \\\\");
     }
 }
