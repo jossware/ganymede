@@ -72,7 +72,7 @@ fn prose(text: &str) -> String {
 }
 
 fn tool(name: &str, summary: &str, output: Option<&str>, failed: bool, opts: &Options) -> String {
-    let mut line = format!("- **{name}**");
+    let mut line = format!("- **{}**", escape::label(name));
     let span = escape::code_span(summary);
     if !span.is_empty() {
         line.push(' ');
@@ -391,6 +391,15 @@ mod tests {
         assert_eq!(
             body(&s, &opts()),
             "> [!TIP]\n> **Agent: a\\*\\*b \\# heading**\n>\n> rep\n"
+        );
+    }
+
+    #[test]
+    fn tool_name_stays_in_the_header() {
+        let s = session(vec![tool("mcp__srv__x*y\n# h", "", None, false)]);
+        assert_eq!(
+            body(&s, &opts()),
+            "> **Claude**\n\n- **mcp\\_\\_srv\\_\\_x\\*y \\# h**\n"
         );
     }
 }

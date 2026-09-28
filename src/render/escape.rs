@@ -58,7 +58,7 @@ pub fn code_span(text: &str) -> String {
     format!("{delimiter}{pad}{body}{pad}{delimiter}")
 }
 
-/// A name inside a one-line bold label. Every CommonMark and Obsidian marker
+/// A tool or agent name inside a one-line bold label. Every CommonMark and Obsidian marker
 /// is backslash-escaped, since a name has no formatting worth keeping.
 pub fn label(text: &str) -> String {
     let collapsed = text.split_whitespace().collect::<Vec<_>>().join(" ");
