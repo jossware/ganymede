@@ -12,7 +12,8 @@ pub enum Block {
 
 /// Text for an unquoted entry.
 pub fn markdown(text: &str) -> String {
-    segments(text)
+    let text = normalize_newlines(text);
+    segments(&text)
         .into_iter()
         .map(|segment| match segment {
             Segment::Prose(lines) => prose(&lines),
@@ -24,7 +25,8 @@ pub fn markdown(text: &str) -> String {
 
 /// Text for a callout, split so fences can be emitted outside the quote.
 pub fn blocks(text: &str) -> Vec<Block> {
-    segments(text)
+    let text = normalize_newlines(text);
+    segments(&text)
         .into_iter()
         .filter_map(|segment| match segment {
             Segment::Prose(lines) => {
@@ -84,7 +86,13 @@ fn longest_run(s: &str, ch: char) -> usize {
 
 /// Rust's `trim` also strips Unicode spaces such as NBSP, which CommonMark
 /// treats as text.
-const MD_SPACE: [char; 3] = [' ', '\t', '\r'];
+const MD_SPACE: [char; 2] = [' ', '\t'];
+
+/// CommonMark ends a line at `\r` too; a scanner splitting only on `\n` would
+/// match code spans across lines Obsidian has already split.
+fn normalize_newlines(text: &str) -> String {
+    text.replace("\r\n", "\n").replace('\r', "\n")
+}
 
 fn is_blank(s: &str) -> bool {
     s.trim_matches(MD_SPACE).is_empty()
@@ -376,7 +384,7 @@ mod tests {
                 "text\n```rust\nfn main() {}\n```",
             ),
             ("~~~~\nx", "~~~~\nx\n~~~~"),
-            ("```\r\n<a>\r\n```\r\nb", "```\r\n<a>\r\n```\nb"),
+            ("```\r\n<a>\r\n```\r\nb", "```\n<a>\n```\nb"),
         ]);
     }
 
@@ -538,7 +546,7 @@ mod tests {
             ("a\n--", "a\n\\--"),
             ("a\n===", "a\n\\==="),
             ("a\n    ---", "a\n    ---"),
-            ("a\r\n---\r\nb", "a\r\n<hr>\nb"),
+            ("a\r\n---\r\nb", "a\n<hr>\nb"),
         ]);
     }
 
@@ -568,11 +576,19 @@ mod tests {
     }
 
     #[test]
+    fn bare_carriage_returns_end_lines() {
+        check(&[
+            (
+                "before `\r<div>\r</div>\r`",
+                "before `\n&lt;div&gt;\n&lt;/div&gt;\n`",
+            ),
+            ("```\r<a>\r```\rb <x>", "```\n<a>\n```\nb &lt;x&gt;"),
+        ]);
+    }
+
+    #[test]
     fn crlf_prose_is_escaped() {
-        check(&[(
-            "```\r\n<a>\r\n```\r\nb <x>",
-            "```\r\n<a>\r\n```\nb &lt;x&gt;",
-        )]);
+        check(&[("```\r\n<a>\r\n```\r\nb <x>", "```\n<a>\n```\nb &lt;x&gt;")]);
     }
 
     #[test]
