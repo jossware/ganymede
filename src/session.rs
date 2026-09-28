@@ -53,6 +53,18 @@ pub enum Entry {
     },
 }
 
+impl Entry {
+    pub fn at(&self) -> Option<Timestamp> {
+        match self {
+            Entry::User { at, .. }
+            | Entry::Assistant { at, .. }
+            | Entry::Thinking { at, .. }
+            | Entry::Tool { at, .. }
+            | Entry::AgentReport { at, .. } => *at,
+        }
+    }
+}
+
 impl Session {
     pub fn new(harness: Harness, transcript: PathBuf) -> Self {
         Self {
