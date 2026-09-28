@@ -89,8 +89,19 @@ fn scalar(value: &str) -> String {
     }
 }
 
+/// YAML rejects a raw control character even inside double quotes.
 fn quote(value: &str) -> String {
-    format!("\"{}\"", value.replace('\\', "\\\\").replace('"', "\\\""))
+    let mut out = String::from("\"");
+    for c in value.chars() {
+        match c {
+            '\\' => out.push_str("\\\\"),
+            '"' => out.push_str("\\\""),
+            c if c.is_control() => out.push_str(&format!("\\x{:02X}", c as u32)),
+            c => out.push(c),
+        }
+    }
+    out.push('"');
+    out
 }
 
 #[cfg(test)]
@@ -206,6 +217,18 @@ transcript: t.jsonl
             let fm = frontmatter(&s, "p", None, &tz());
             assert_eq!(line(&fm, "title"), Some(want), "{source:?}");
         }
+    }
+
+    #[test]
+    fn control_characters_are_escaped() {
+        let mut s = Session::new(Harness::Claude, "t.jsonl".into());
+        s.title_source = Some("fix \x1b[31mred\x1b[0m text".into());
+        let fm = frontmatter(&s, "a\u{7f}b", None, &tz());
+        assert_eq!(
+            line(&fm, "title"),
+            Some("\"fix \\x1B[31mred\\x1B[0m text\"")
+        );
+        assert_eq!(line(&fm, "project"), Some("\"a\\x7Fb\""));
     }
 
     #[test]
