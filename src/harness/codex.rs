@@ -669,7 +669,10 @@ mod tests {
             r#"{"type":"event_msg","payload":{"type":"item_completed","item":{"type":"UserMessage","content":[{"type":"image"},{"type":"text","text":"$code-review what does [image] mean"}]}}}"#,
         ))
         .unwrap();
-        assert_eq!(users(&s), ["[image]\n\n$code-review what does [image] mean"]);
+        assert_eq!(
+            users(&s),
+            ["[image]\n\n$code-review what does [image] mean"]
+        );
         assert_eq!(s.title_source.as_deref(), Some("what does [image] mean"));
     }
 
