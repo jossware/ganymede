@@ -1,0 +1,30 @@
+---
+source: src/render/markdown.rs
+expression: "body(&s, &opts())"
+---
+> [!NOTE]
+> **User**
+>
+> before
+
+```sh
+ls <dir>
+```
+
+> after
+
+> [!TIP]
+> **Agent: agent**
+
+```
+x
+```
+
+> tail
+
+> [!NOTE]
+> **User**
+
+```
+only
+```

@@ -1,0 +1,27 @@
+---
+source: src/render/markdown.rs
+expression: "body(&s, &opts())"
+---
+> **Claude** `09/03 22:25:00`
+
+a1
+
+> [!NOTE]
+> **User**
+>
+> u
+
+> **Claude**
+
+a2
+
+> [!TIP]
+> **Agent: r**
+>
+> rep
+
+> **Claude**
+
+- **Bash** `ls`
+
+a3
