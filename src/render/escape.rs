@@ -58,14 +58,16 @@ pub fn code_span(text: &str) -> String {
     format!("{delimiter}{pad}{body}{pad}{delimiter}")
 }
 
-/// `max == 0` means no limit.
+/// `max == 0` means no limit. A terminal newline does not start another line.
 pub fn truncate_lines(text: &str, max: usize) -> String {
     if max == 0 {
         return text.to_string();
     }
     match text.match_indices('\n').nth(max - 1) {
-        Some((end, _)) => format!("{}\n... (truncated)", &text[..end]),
-        None => text.to_string(),
+        Some((end, _)) if end + 1 < text.len() => {
+            format!("{}\n... (truncated)", &text[..end])
+        }
+        _ => text.to_string(),
     }
 }
 
@@ -357,6 +359,9 @@ mod tests {
             ("a\nb\nc\nd\ne", 2, "a\nb\n... (truncated)"),
             ("hello", 1, "hello"),
             ("a\nb\nc", 0, "a\nb\nc"),
+            ("hello\n", 1, "hello\n"),
+            ("a\nb\n", 2, "a\nb\n"),
+            ("a\nb\n\n", 2, "a\nb\n... (truncated)"),
         ] {
             assert_eq!(truncate_lines(text, max), want, "text: {text:?}");
         }
