@@ -1,0 +1,13 @@
+---
+source: src/render/markdown.rs
+expression: "body(&s, &opts)"
+---
+> [!NOTE]
+> **User**
+>
+> one
+
+> [!NOTE]
+> **User**
+>
+> two

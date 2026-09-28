@@ -1,5 +1,6 @@
 pub mod escape;
 pub mod frontmatter;
+pub mod markdown;
 
 use jiff::tz::TimeZone;
 
