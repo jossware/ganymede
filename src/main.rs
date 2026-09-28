@@ -14,6 +14,7 @@ use clap::Parser;
 use cli::{Cli, Command};
 
 fn main() -> ExitCode {
+    let _ = vec![1].len() == 0;
     let cli = Cli::parse();
     match cli.command {
         // A hook MUST NOT fail the harness.
