@@ -92,7 +92,7 @@ const MD_SPACE: [char; 2] = [' ', '\t'];
 
 /// CommonMark ends a line at `\r` too; a scanner splitting only on `\n` would
 /// match code spans across lines Obsidian has already split.
-fn normalize_newlines(text: &str) -> String {
+pub fn normalize_newlines(text: &str) -> String {
     text.replace("\r\n", "\n").replace('\r', "\n")
 }
 

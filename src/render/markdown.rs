@@ -84,8 +84,9 @@ fn tool(name: &str, summary: &str, output: Option<&str>, failed: bool, opts: &Op
     let Some(output) = output.filter(|_| opts.tool_output) else {
         return line;
     };
-    let output = escape::truncate_lines(output, opts.max_lines);
-    let output = output.trim_end_matches(['\n', '\r']);
+    let output = escape::normalize_newlines(output);
+    let output = escape::truncate_lines(&output, opts.max_lines);
+    let output = output.trim_end_matches('\n');
     if output.is_empty() {
         return line;
     }
@@ -360,11 +361,27 @@ mod tests {
     }
 
     #[test]
-    fn tool_output_keeps_crlf_inside_the_fence() {
+    fn tool_output_crlf_becomes_lf() {
         let s = session(vec![tool("Bash", "type", Some("a\r\nb\r\n"), false)]);
         assert_eq!(
             body(&s, &opts()),
-            "> **Claude**\n\n- **Bash** `type`\n\n  ```\n  a\r\n  b\n  ```\n"
+            "> **Claude**\n\n- **Bash** `type`\n\n  ```\n  a\n  b\n  ```\n"
+        );
+    }
+
+    #[test]
+    fn tool_output_bare_cr_stays_inside_the_fence() {
+        let s = session(vec![
+            tool("Bash", "curl", Some("  0%\r 50%\r100%\ndone"), false),
+            tool("Bash", "ls", Some("ok"), false),
+        ]);
+        let opts = Options {
+            max_lines: 3,
+            ..opts()
+        };
+        assert_eq!(
+            body(&s, &opts),
+            "> **Claude**\n\n- **Bash** `curl`\n\n  ```\n    0%\n   50%\n  100%\n  ... (truncated)\n  ```\n\n- **Bash** `ls`\n\n  ```\n  ok\n  ```\n"
         );
     }
 }
