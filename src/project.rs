@@ -1,7 +1,7 @@
 //! The project and worktree a session's note is filed under.
 
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 const UNKNOWN: &str = "unknown";
 
@@ -91,8 +91,55 @@ fn main_checkout(level: &Path) -> Level {
     }
 }
 
-fn git_file(_level: &Path, _file: &Path) -> Level {
-    Level::Broken
+fn git_file(level: &Path, file: &Path) -> Level {
+    let contents = fs::read_to_string(file).unwrap_or_default();
+    let gitdir = contents
+        .lines()
+        .find_map(|line| line.strip_prefix("gitdir:"))
+        .and_then(|target| follow(level, target));
+    let Some(gitdir) = gitdir else {
+        return Level::Broken;
+    };
+    let commondir = gitdir.join("commondir");
+    if !commondir.exists() {
+        // Submodules and `--separate-git-dir` checkouts own their git dir outright.
+        return main_checkout(level);
+    }
+    let common = fs::read_to_string(&commondir)
+        .ok()
+        .and_then(|target| follow(&gitdir, &target));
+    match common {
+        Some(common) => Level::Checkout {
+            main: common_name(&common),
+            worktree: Some(basename(level)),
+        },
+        None => Level::Broken,
+    }
+}
+
+/// Resolves a pointer file's target against `base`. A target that does not
+/// exist is a broken pointer.
+fn follow(base: &Path, target: &str) -> Option<PathBuf> {
+    let target = target.trim();
+    if target.is_empty() {
+        return None;
+    }
+    fs::canonicalize(base.join(target)).ok()
+}
+
+fn common_name(common: &Path) -> String {
+    let parent = || common.parent().map(basename).unwrap_or_default();
+    let own = basename(common);
+    if own == ".git" {
+        return parent();
+    }
+    let own = own.strip_suffix(".git").unwrap_or(&own);
+    // `foo/.bare` is a convention for keeping worktrees beside a hidden bare repo.
+    if own.starts_with('.') {
+        parent()
+    } else {
+        own.to_string()
+    }
 }
 
 fn jj_workspace(_level: &Path, _pointer: &Path) -> Level {
@@ -234,5 +281,129 @@ mod tests {
         let root = tmp();
         let dir = root.path().join(OsStr::from_bytes(b"caf\xe9"));
         assert_eq!(at(&dir), plain("caf\u{FFFD}"));
+    }
+
+    /// Lays out a linked worktree the way git 2.55 does.
+    fn link_worktree(common: &Path, wt: &Path) {
+        let admin = common.join("worktrees").join(wt.file_name().unwrap());
+        write(&admin.join("commondir"), "../..\n");
+        write(&wt.join(".git"), &format!("gitdir: {}\n", admin.display()));
+    }
+
+    #[test]
+    fn worktree_names_main_and_worktree() {
+        let root = tmp();
+        let main = root.path().join("main");
+        let wt = root.path().join("wt");
+        mkdir(&main.join(".git"));
+        link_worktree(&main.join(".git"), &wt);
+        assert_eq!(at(&wt), repo("main", Some("wt")));
+        assert_eq!(at(&wt.join("src/deep")), repo("main", Some("wt")));
+    }
+
+    #[test]
+    fn worktree_with_relative_gitdir() {
+        let root = tmp();
+        let main = root.path().join("main");
+        let wt = root.path().join("wt");
+        mkdir(&main.join(".git"));
+        link_worktree(&main.join(".git"), &wt);
+        write(&wt.join(".git"), "gitdir: ../main/.git/worktrees/wt\n");
+        assert_eq!(at(&wt), repo("main", Some("wt")));
+    }
+
+    #[test]
+    fn pointer_whitespace_is_trimmed() {
+        let root = tmp();
+        let main = root.path().join("main");
+        let wt = root.path().join("wt");
+        mkdir(&main.join(".git"));
+        link_worktree(&main.join(".git"), &wt);
+        let admin = main.join(".git/worktrees/wt");
+        write(
+            &wt.join(".git"),
+            &format!("gitdir: {}  \r\n", admin.display()),
+        );
+        write(&admin.join("commondir"), "../..\r\n");
+        assert_eq!(at(&wt), repo("main", Some("wt")));
+    }
+
+    #[test]
+    fn bare_common_dir_names_itself() {
+        let root = tmp();
+        let bare = root.path().join("krew-index");
+        mkdir(&bare.join("objects"));
+        link_worktree(&bare, &bare.join("main"));
+        assert_eq!(at(&bare.join("main")), repo("krew-index", Some("main")));
+        assert_eq!(at(&bare), plain("krew-index"));
+    }
+
+    #[test]
+    fn bare_common_dir_drops_git_suffix() {
+        let root = tmp();
+        let bare = root.path().join("foo.git");
+        mkdir(&bare);
+        link_worktree(&bare, &root.path().join("foo-wt"));
+        assert_eq!(at(&root.path().join("foo-wt")), repo("foo", Some("foo-wt")));
+    }
+
+    #[test]
+    fn hidden_bare_common_dir_defers_to_its_parent() {
+        let root = tmp();
+        let foo = root.path().join("foo");
+        mkdir(&foo.join(".bare"));
+        link_worktree(&foo.join(".bare"), &foo.join("main"));
+        assert_eq!(at(&foo.join("main")), repo("foo", Some("main")));
+    }
+
+    #[test]
+    fn submodule_is_its_own_main_checkout() {
+        let root = tmp();
+        let sup = root.path().join("sup");
+        mkdir(&sup.join(".git/modules/themes/sub"));
+        write(
+            &sup.join("themes/sub/.git"),
+            "gitdir: ../../.git/modules/themes/sub\n",
+        );
+        assert_eq!(at(&sup.join("themes/sub/layouts")), repo("sub", None));
+    }
+
+    #[test]
+    fn broken_git_pointers_name_the_checkout() {
+        let root = tmp();
+        let main = root.path().join("main");
+        mkdir(&main.join(".git"));
+
+        let missing_gitdir = root.path().join("wt1");
+        write(
+            &missing_gitdir.join(".git"),
+            &format!("gitdir: {}\n", root.path().join("nowhere").display()),
+        );
+
+        let missing_common = root.path().join("wt2");
+        link_worktree(&main.join(".git"), &missing_common);
+        write(
+            &main.join(".git/worktrees/wt2/commondir"),
+            "../../missing\n",
+        );
+
+        let empty = root.path().join("wt3");
+        write(&empty.join(".git"), "");
+
+        let no_prefix = root.path().join("wt4");
+        write(&no_prefix.join(".git"), "nonsense\n");
+
+        let empty_target = root.path().join("wt5");
+        write(&empty_target.join(".git"), "gitdir: \n");
+
+        for (wt, name) in [
+            (&missing_gitdir, "wt1"),
+            (&missing_common, "wt2"),
+            (&empty, "wt3"),
+            (&no_prefix, "wt4"),
+            (&empty_target, "wt5"),
+        ] {
+            assert_eq!(at(&wt.join("src")), plain(name), "{name}");
+        }
     }
 }
