@@ -84,8 +84,7 @@ fn tool(name: &str, summary: &str, output: Option<&str>, failed: bool, opts: &Op
     let Some(output) = output.filter(|_| opts.tool_output) else {
         return line;
     };
-    let output = escape::normalize_newlines(output);
-    let output = escape::truncate_lines(&output, opts.max_lines);
+    let output = escape::truncate_lines(output, opts.max_lines);
     let output = output.trim_end_matches('\n');
     if output.is_empty() {
         return line;

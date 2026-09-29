@@ -1,5 +1,7 @@
 //! Obsidian-safe markdown from harness text.
 
+use std::collections::{HashMap, VecDeque};
+
 const MAX_SUMMARY_LEN: usize = 80;
 
 #[derive(Debug, PartialEq, Eq)]
@@ -74,14 +76,15 @@ pub fn label(text: &str) -> String {
 
 /// `max == 0` means no limit. A terminal newline does not start another line.
 pub fn truncate_lines(text: &str, max: usize) -> String {
+    let text = normalize_newlines(text);
     if max == 0 {
-        return text.to_string();
+        return text;
     }
     match text.match_indices('\n').nth(max - 1) {
         Some((end, _)) if end + 1 < text.len() => {
             format!("{}\n... (truncated)", &text[..end])
         }
-        _ => text.to_string(),
+        _ => text,
     }
 }
 
@@ -106,7 +109,7 @@ const MD_SPACE: [char; 2] = [' ', '\t'];
 
 /// CommonMark ends a line at `\r` too; a scanner splitting only on `\n` would
 /// match code spans across lines Obsidian has already split.
-pub fn normalize_newlines(text: &str) -> String {
+fn normalize_newlines(text: &str) -> String {
     text.replace("\r\n", "\n").replace('\r', "\n")
 }
 
@@ -143,11 +146,17 @@ fn segments(text: &str) -> Vec<Segment<'_>> {
             out.push(Segment::Prose(std::mem::take(&mut prose)));
         }
         let mut body = Vec::new();
+        let mut closed = false;
         for line in lines.by_ref() {
             if closes(line, &open) {
+                closed = true;
                 break;
             }
             body.push(dedent(line, open.indent));
+        }
+        // A terminal newline leaves an empty last line that is not content.
+        if !closed && body.last() == Some(&"") {
+            body.pop();
         }
         out.push(Segment::Fence(fence(line, &open, &body)));
     }
@@ -265,22 +274,27 @@ fn underline(line: &str) -> String {
 }
 
 fn inline(text: &str, out: &mut String) {
+    let mut runs = backtick_runs(text);
     let mut i = 0;
     let mut after_space = true;
+    let mut backslashes = 0;
     while let Some(c) = text[i..].chars().next() {
         let rest = &text[i..];
+        let escaped = backslashes % 2 == 1;
         match c {
-            '`' => {
+            // Backslashes are literal inside a span, so only an opener can be escaped.
+            '`' if !escaped => {
                 let n = run_len(rest, '`');
-                let len = closing_run(&rest[n..], n).map_or(n, |end| n + end + n);
+                let len = closing_run(&mut runs, n, i + n).map_or(n, |end| end + n - i);
                 out.push_str(&rest[..len]);
                 i += len;
                 after_space = false;
+                backslashes = 0;
                 continue;
             }
             '<' | '>' => {
                 // An odd backslash run would otherwise escape the entity's `&`.
-                if text[..i].bytes().rev().take_while(|&b| b == b'\\').count() % 2 == 1 {
+                if escaped {
                     out.push('\\');
                 }
                 out.push_str(if c == '<' { "&lt;" } else { "&gt;" });
@@ -288,25 +302,42 @@ fn inline(text: &str, out: &mut String) {
             '#' if after_space && rest[1..].chars().next().is_some_and(is_tag_char) => {
                 out.push_str("\\#");
             }
+            // Two `%` open an Obsidian comment that hides text up to the next pair.
+            '%' if text[..i].ends_with('%') || rest[1..].starts_with('%') => {
+                if !escaped {
+                    out.push('\\');
+                }
+                out.push('%');
+            }
             _ => out.push(c),
         }
         after_space = c.is_whitespace();
+        backslashes = if c == '\\' { backslashes + 1 } else { 0 };
         i += c.len_utf8();
     }
 }
 
-/// CommonMark closes a span only on a run of equal length.
-fn closing_run(s: &str, n: usize) -> Option<usize> {
+/// The start of every maximal backtick run, keyed by run length, in order.
+fn backtick_runs(text: &str) -> HashMap<usize, VecDeque<usize>> {
+    let mut runs = HashMap::<usize, VecDeque<usize>>::new();
     let mut i = 0;
-    while let Some(offset) = s[i..].find('`') {
+    while let Some(offset) = text[i..].find('`') {
         let start = i + offset;
-        let len = run_len(&s[start..], '`');
-        if len == n {
-            return Some(start);
-        }
+        let len = run_len(&text[start..], '`');
+        runs.entry(len).or_default().push_back(start);
         i = start + len;
     }
-    None
+    runs
+}
+
+/// CommonMark closes a span only on a run of equal length. Openers only move
+/// forward, so runs before `from` are dropped for good, keeping the scan linear.
+fn closing_run(runs: &mut HashMap<usize, VecDeque<usize>>, n: usize, from: usize) -> Option<usize> {
+    let starts = runs.get_mut(&n)?;
+    while starts.front().is_some_and(|&start| start < from) {
+        starts.pop_front();
+    }
+    starts.front().copied()
 }
 
 fn is_tag_char(c: char) -> bool {
@@ -376,6 +407,10 @@ mod tests {
             ("hello\n", 1, "hello\n"),
             ("a\nb\n", 2, "a\nb\n"),
             ("a\nb\n\n", 2, "a\nb\n... (truncated)"),
+            ("a\rb\rc", 1, "a\n... (truncated)"),
+            ("a\r\nb\r\nc", 2, "a\nb\n... (truncated)"),
+            ("a\r\n", 1, "a\n"),
+            ("a\rb", 0, "a\nb"),
         ] {
             assert_eq!(truncate_lines(text, max), want, "text: {text:?}");
         }
@@ -403,6 +438,8 @@ mod tests {
                 "text\n```rust\nfn main() {}\n```",
             ),
             ("~~~~\nx", "~~~~\nx\n~~~~"),
+            ("```\nx\n", "```\nx\n```"),
+            ("```\nx\n\n", "```\nx\n\n```"),
             ("```\r\n<a>\r\n```\r\nb", "```\n<a>\n```\nb"),
         ]);
     }
@@ -587,6 +624,43 @@ mod tests {
             ("a `x\n<y>` b", "a `x\n&lt;y&gt;` b"),
             ("a ``x ` <y>`` <z>", "a ``x ` <y>`` &lt;z&gt;"),
         ]);
+    }
+
+    #[test]
+    fn comment_markers_are_escaped_outside_code() {
+        check(&[
+            (
+                "for %%i in (*) do echo %%i",
+                r"for \%\%i in (*) do echo \%\%i",
+            ),
+            ("100% sure", "100% sure"),
+            ("a %%% b", r"a \%\%\% b"),
+            (r"50\%% done", r"50\%\% done"),
+            (r"50%\% done", r"50%\% done"),
+            (r"even \\%%", r"even \\\%\%"),
+            ("use `%%i` here", "use `%%i` here"),
+            ("```bat\necho %%i\n```", "```bat\necho %%i\n```"),
+        ]);
+    }
+
+    #[test]
+    fn escaped_backticks_do_not_open_a_span() {
+        check(&[
+            (r"use \`<x>\` here", r"use \`&lt;x&gt;\` here"),
+            (r"\``<x>`", r"\``<x>`"),
+            (r"\\`<x>`", r"\\`<x>`"),
+            (r"`a\` <x>", r"`a\` &lt;x&gt;"),
+        ]);
+    }
+
+    #[test]
+    fn unmatched_backtick_runs_scan_in_linear_time() {
+        let text: String = (1..=3000).map(|n| "`".repeat(n) + " ").collect();
+        let start = std::time::Instant::now();
+        assert_eq!(markdown(&text), text);
+        let elapsed = start.elapsed();
+        // Generous for slow CI runners; a quadratic scan takes minutes here.
+        assert!(elapsed.as_secs() < 10, "took {elapsed:?}");
     }
 
     #[test]
