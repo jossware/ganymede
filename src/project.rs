@@ -48,6 +48,26 @@ enum Level {
     },
 }
 
+/// `pinned` is the `project:` of the note being rewritten. A note never
+/// moves once written, so it overrides whatever the cwds now say.
+pub fn identify(cwds: &[PathBuf], pinned: Option<&str>, home: &Path) -> ProjectId {
+    let resolved: Vec<Resolved> = cwds.iter().map(|dir| resolve(dir, home)).collect();
+    let name = match pinned {
+        Some(name) => name.to_string(),
+        None => resolved
+            .iter()
+            .find(|r| r.in_repo)
+            .or(resolved.first())
+            .map_or_else(|| UNKNOWN.to_string(), |r| r.id.name.clone()),
+    };
+    let worktree = resolved
+        .iter()
+        .rev()
+        .find(|r| r.id.name == name)
+        .and_then(|r| r.id.worktree.clone());
+    ProjectId { name, worktree }
+}
+
 fn resolve(dir: &Path, home: &Path) -> Resolved {
     // Codex Desktop makes a fresh directory here for every chat not tied to a folder.
     let chats = home.join("Documents").join("Codex");
@@ -461,5 +481,99 @@ mod tests {
         let ws = root.path().join("ws1");
         write(&ws.join(".jj/repo"), "../../gone/.jj/repo");
         assert_eq!(at(&ws.join("src")), plain("ws1"));
+    }
+
+    fn id(name: &str, worktree: Option<&str>) -> ProjectId {
+        ProjectId {
+            name: name.into(),
+            worktree: worktree.map(Into::into),
+        }
+    }
+
+    #[test]
+    fn first_cwd_in_a_repo_wins() {
+        let root = tmp();
+        let (p1, p2) = (root.path().join("p1"), root.path().join("p2"));
+        mkdir(&p1.join(".git"));
+        mkdir(&p2.join(".git"));
+        let cwds = [root.path().to_path_buf(), p1, p2];
+        assert_eq!(identify(&cwds, None, root.path()), id("p1", None));
+    }
+
+    #[test]
+    fn with_no_repo_the_first_cwd_wins() {
+        let root = tmp();
+        let cwds = [root.path().join("a"), root.path().join("b")];
+        assert_eq!(identify(&cwds, None, root.path()), id("a", None));
+    }
+
+    #[test]
+    fn no_cwds_is_unknown() {
+        let root = tmp();
+        assert_eq!(identify(&[], None, root.path()), id("unknown", None));
+    }
+
+    #[test]
+    fn chat_counts_as_a_repo() {
+        let root = tmp();
+        let cwds = [
+            root.path().join("x"),
+            root.path().join("Documents/Codex/c1"),
+        ];
+        assert_eq!(identify(&cwds, None, root.path()), id("chat", None));
+    }
+
+    #[test]
+    fn worktree_comes_from_the_last_matching_cwd() {
+        let root = tmp();
+        let main = root.path().join("main");
+        let wt = root.path().join("wt");
+        mkdir(&main.join(".git"));
+        link_worktree(&main.join(".git"), &wt);
+        let into_wt = [main.clone(), wt.clone()];
+        assert_eq!(
+            identify(&into_wt, None, root.path()),
+            id("main", Some("wt"))
+        );
+        let back_to_main = [wt, main];
+        assert_eq!(identify(&back_to_main, None, root.path()), id("main", None));
+    }
+
+    #[test]
+    fn pinned_name_is_kept_without_a_match() {
+        let root = tmp();
+        let main = root.path().join("main");
+        mkdir(&main.join(".git"));
+        assert_eq!(
+            identify(&[main], Some("old-name"), root.path()),
+            id("old-name", None)
+        );
+    }
+
+    #[test]
+    fn pinned_name_takes_its_worktree() {
+        let root = tmp();
+        let main = root.path().join("main");
+        let wt = root.path().join("wt");
+        mkdir(&main.join(".git"));
+        link_worktree(&main.join(".git"), &wt);
+        let cwds = [root.path().join("elsewhere"), wt];
+        assert_eq!(
+            identify(&cwds, Some("main"), root.path()),
+            id("main", Some("wt"))
+        );
+    }
+
+    #[test]
+    fn pinned_name_matches_after_dot_stripping() {
+        let root = tmp();
+        let dotfiles = root.path().join(".dotfiles");
+        let wt = root.path().join("dotfiles-wt");
+        mkdir(&dotfiles.join(".git"));
+        link_worktree(&dotfiles.join(".git"), &wt);
+        assert_eq!(
+            identify(&[wt], Some("dotfiles"), root.path()),
+            id("dotfiles", Some("dotfiles-wt"))
+        );
     }
 }
