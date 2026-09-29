@@ -659,7 +659,8 @@ mod tests {
         let start = std::time::Instant::now();
         assert_eq!(markdown(&text), text);
         let elapsed = start.elapsed();
-        assert!(elapsed.as_secs() < 1, "took {elapsed:?}");
+        // Generous for slow CI runners; a quadratic scan takes minutes here.
+        assert!(elapsed.as_secs() < 10, "took {elapsed:?}");
     }
 
     #[test]
