@@ -142,8 +142,21 @@ fn common_name(common: &Path) -> String {
     }
 }
 
-fn jj_workspace(_level: &Path, _pointer: &Path) -> Level {
-    Level::Broken
+fn jj_workspace(level: &Path, pointer: &Path) -> Level {
+    let repo = fs::read_to_string(pointer)
+        .ok()
+        .and_then(|target| follow(&level.join(".jj"), &target));
+    match repo
+        .as_deref()
+        .and_then(Path::parent)
+        .and_then(Path::parent)
+    {
+        Some(main) => Level::Checkout {
+            main: basename(main),
+            worktree: Some(basename(level)),
+        },
+        None => Level::Broken,
+    }
 }
 
 fn basename(p: &Path) -> String {
@@ -405,5 +418,48 @@ mod tests {
         ] {
             assert_eq!(at(&wt.join("src")), plain(name), "{name}");
         }
+    }
+
+    #[test]
+    fn jj_workspace_names_main_and_workspace() {
+        let root = tmp();
+        let main = root.path().join("main");
+        let ws = root.path().join("ws1");
+        mkdir(&main.join(".jj/repo"));
+        // jj 0.44 writes the pointer relative to the workspace's `.jj`.
+        write(&ws.join(".jj/repo"), "../../main/.jj/repo");
+        assert_eq!(at(&ws), repo("main", Some("ws1")));
+        assert_eq!(at(&ws.join("src")), repo("main", Some("ws1")));
+    }
+
+    #[test]
+    fn jj_workspace_nested_in_main() {
+        let root = tmp();
+        let main = root.path().join("main");
+        let ws = main.join(".workspaces/ws");
+        mkdir(&main.join(".jj/repo"));
+        write(&ws.join(".jj/repo"), "../../../.jj/repo");
+        assert_eq!(at(&ws), repo("main", Some("ws")));
+    }
+
+    #[test]
+    fn jj_workspace_with_absolute_pointer() {
+        let root = tmp();
+        let main = root.path().join("main");
+        let ws = root.path().join("ws1");
+        mkdir(&main.join(".jj/repo"));
+        write(
+            &ws.join(".jj/repo"),
+            &main.join(".jj/repo").display().to_string(),
+        );
+        assert_eq!(at(&ws), repo("main", Some("ws1")));
+    }
+
+    #[test]
+    fn broken_jj_pointer_names_the_workspace() {
+        let root = tmp();
+        let ws = root.path().join("ws1");
+        write(&ws.join(".jj/repo"), "../../gone/.jj/repo");
+        assert_eq!(at(&ws.join("src")), plain("ws1"));
     }
 }
