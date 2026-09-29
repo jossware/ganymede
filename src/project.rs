@@ -52,7 +52,7 @@ enum Level {
 /// moves once written, so it overrides whatever the cwds now say.
 pub fn identify(cwds: &[PathBuf], pinned: Option<&str>, home: &Path) -> ProjectId {
     let resolved: Vec<Resolved> = cwds.iter().map(|dir| resolve(dir, home)).collect();
-    let name = match pinned {
+    let name = match pinned.filter(|name| !name.trim().is_empty()) {
         Some(name) => name.to_string(),
         None => resolved
             .iter()
@@ -575,5 +575,20 @@ mod tests {
             identify(&[wt], Some("dotfiles"), root.path()),
             id("dotfiles", Some("dotfiles-wt"))
         );
+    }
+
+    #[test]
+    fn blank_pinned_name_is_recomputed() {
+        let root = tmp();
+        let main = root.path().join("main");
+        mkdir(&main.join(".git"));
+        let cwds = [main];
+        for pinned in ["", "  "] {
+            assert_eq!(
+                identify(&cwds, Some(pinned), root.path()),
+                id("main", None),
+                "{pinned:?}"
+            );
+        }
     }
 }
