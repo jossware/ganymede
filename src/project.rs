@@ -141,14 +141,16 @@ fn read_pointer(file: &Path) -> Option<String> {
     fs::read_to_string(file).ok()
 }
 
-/// Resolves a pointer file's target against `base`. A target that does not
-/// exist is a broken pointer.
+/// Every pointer names a git or jj directory. A target that is not one is a
+/// broken pointer.
 fn follow(base: &Path, target: &str) -> Option<PathBuf> {
     let target = target.trim();
     if target.is_empty() {
         return None;
     }
-    fs::canonicalize(base.join(target)).ok()
+    fs::canonicalize(base.join(target))
+        .ok()
+        .filter(|path| path.is_dir())
 }
 
 fn common_name(common: &Path) -> String {
@@ -431,6 +433,39 @@ mod tests {
                 .recv_timeout(Duration::from_secs(5))
                 .unwrap_or_else(|_| panic!("{name}: blocked reading a FIFO"));
             assert_eq!(got, plain(name), "{name}");
+        }
+    }
+
+    #[test]
+    fn pointers_to_files_are_broken() {
+        let root = tmp();
+        let main = root.path().join("main");
+        mkdir(&main.join(".git"));
+        let stray = root.path().join("stray");
+        write(&stray, "not a repo\n");
+
+        let git_to_file = root.path().join("wt1");
+        write(
+            &git_to_file.join(".git"),
+            &format!("gitdir: {}\n", stray.display()),
+        );
+
+        let common_to_file = root.path().join("wt2");
+        link_worktree(&main.join(".git"), &common_to_file);
+        write(
+            &main.join(".git/worktrees/wt2/commondir"),
+            &stray.display().to_string(),
+        );
+
+        let jj_to_file = root.path().join("ws1");
+        write(&jj_to_file.join(".jj/repo"), &stray.display().to_string());
+
+        for (dir, name) in [
+            (git_to_file, "wt1"),
+            (common_to_file, "wt2"),
+            (jj_to_file, "ws1"),
+        ] {
+            assert_eq!(at(&dir), plain(name), "{name}");
         }
     }
 
