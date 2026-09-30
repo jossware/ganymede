@@ -148,18 +148,12 @@ fn follow(base: &Path, target: &str) -> Option<PathBuf> {
 }
 
 fn common_name(common: &Path) -> String {
-    let parent = || common.parent().map(basename).unwrap_or_default();
     let own = basename(common);
-    if own == ".git" {
-        return parent();
+    // `foo/.bare` is a convention for keeping worktrees beside a bare repo.
+    if own == ".git" || own == ".bare" {
+        return common.parent().map(basename).unwrap_or_default();
     }
-    let own = own.strip_suffix(".git").unwrap_or(&own);
-    // `foo/.bare` is a convention for keeping worktrees beside a hidden bare repo.
-    if own.starts_with('.') {
-        parent()
-    } else {
-        own.to_string()
-    }
+    own.strip_suffix(".git").unwrap_or(&own).to_string()
 }
 
 fn jj_workspace(level: &Path, pointer: &Path) -> Level {
@@ -387,6 +381,15 @@ mod tests {
         mkdir(&foo.join(".bare"));
         link_worktree(&foo.join(".bare"), &foo.join("main"));
         assert_eq!(at(&foo.join("main")), repo("foo", Some("main")));
+    }
+
+    #[test]
+    fn other_hidden_bare_common_dirs_name_themselves() {
+        let root = tmp();
+        let repos = root.path().join("repos");
+        mkdir(&repos.join(".dotfiles"));
+        link_worktree(&repos.join(".dotfiles"), &repos.join("wt"));
+        assert_eq!(at(&repos.join("wt")), repo("dotfiles", Some("wt")));
     }
 
     #[test]
