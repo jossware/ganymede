@@ -112,7 +112,7 @@ fn main_checkout(level: &Path) -> Level {
 }
 
 fn git_file(level: &Path, file: &Path) -> Level {
-    let contents = fs::read_to_string(file).unwrap_or_default();
+    let contents = read_pointer(file).unwrap_or_default();
     let gitdir = contents
         .lines()
         .find_map(|line| line.strip_prefix("gitdir:"))
@@ -125,9 +125,7 @@ fn git_file(level: &Path, file: &Path) -> Level {
         // Submodules and `--separate-git-dir` checkouts own their git dir outright.
         return main_checkout(level);
     }
-    let common = fs::read_to_string(&commondir)
-        .ok()
-        .and_then(|target| follow(&gitdir, &target));
+    let common = read_pointer(&commondir).and_then(|target| follow(&gitdir, &target));
     match common {
         Some(common) => Level::Checkout {
             main: common_name(&common),
@@ -135,6 +133,12 @@ fn git_file(level: &Path, file: &Path) -> Level {
         },
         None => Level::Broken,
     }
+}
+
+/// A FIFO would block the read, and with it the hook.
+fn read_pointer(file: &Path) -> Option<String> {
+    fs::metadata(file).ok().filter(fs::Metadata::is_file)?;
+    fs::read_to_string(file).ok()
 }
 
 /// Resolves a pointer file's target against `base`. A target that does not
@@ -157,9 +161,7 @@ fn common_name(common: &Path) -> String {
 }
 
 fn jj_workspace(level: &Path, pointer: &Path) -> Level {
-    let repo = fs::read_to_string(pointer)
-        .ok()
-        .and_then(|target| follow(&level.join(".jj"), &target));
+    let repo = read_pointer(pointer).and_then(|target| follow(&level.join(".jj"), &target));
     match repo
         .as_deref()
         .and_then(Path::parent)
@@ -390,6 +392,46 @@ mod tests {
         mkdir(&repos.join(".dotfiles"));
         link_worktree(&repos.join(".dotfiles"), &repos.join("wt"));
         assert_eq!(at(&repos.join("wt")), repo("dotfiles", Some("wt")));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn non_regular_pointers_are_broken() {
+        use std::process::Command;
+        use std::sync::mpsc;
+        use std::thread;
+        use std::time::Duration;
+
+        let root = tmp();
+        let main = root.path().join("main");
+        mkdir(&main.join(".git"));
+        let fifo_git = root.path().join("wt1");
+        let fifo_common = root.path().join("wt2");
+        let fifo_jj = root.path().join("ws1");
+        mkdir(&fifo_git);
+        link_worktree(&main.join(".git"), &fifo_common);
+        let commondir = main.join(".git/worktrees/wt2/commondir");
+        fs::remove_file(&commondir).unwrap();
+        mkdir(&fifo_jj.join(".jj"));
+        for fifo in [fifo_git.join(".git"), commondir, fifo_jj.join(".jj/repo")] {
+            assert!(
+                Command::new("mkfifo")
+                    .arg(&fifo)
+                    .status()
+                    .unwrap()
+                    .success()
+            );
+        }
+
+        for (dir, name) in [(fifo_git, "wt1"), (fifo_common, "wt2"), (fifo_jj, "ws1")] {
+            let (tx, rx) = mpsc::channel();
+            let probe = dir.clone();
+            thread::spawn(move || tx.send(at(&probe)).unwrap());
+            let got = rx
+                .recv_timeout(Duration::from_secs(5))
+                .unwrap_or_else(|_| panic!("{name}: blocked reading a FIFO"));
+            assert_eq!(got, plain(name), "{name}");
+        }
     }
 
     #[test]
