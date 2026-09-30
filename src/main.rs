@@ -3,6 +3,8 @@ mod cli;
 #[allow(dead_code)]
 mod harness;
 #[allow(dead_code)]
+mod project;
+#[allow(dead_code)]
 mod render;
 #[allow(dead_code)]
 mod session;
