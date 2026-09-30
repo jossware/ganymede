@@ -37,7 +37,13 @@ const SYNTHETIC_MODEL: &str = "<synthetic>";
 const COMPACTION: &str = "compaction";
 
 /// Tags Claude Code injects into user messages; the user never typed them.
-const INJECTED_TAGS: &[&str] = &["system-reminder", "local-command-caveat", "command-message"];
+/// `bash-notification` is the pre-2.1 background shell notice.
+const INJECTED_TAGS: &[&str] = &[
+    "system-reminder",
+    "local-command-caveat",
+    "command-message",
+    "bash-notification",
+];
 
 /// The input field that names what each tool acts on. `Task` is the old name
 /// for `Agent`.
@@ -530,7 +536,7 @@ fn agent_reports(text: &str) -> (Vec<(String, String)>, String) {
 }
 
 fn teammate_report(block: &str) -> Option<(String, String)> {
-    let (header, body) = block.split_once('>')?;
+    let (header, body) = split_header(block)?;
     let name = attr(header, "teammate_id")?;
     let text = body
         .lines()
@@ -553,6 +559,18 @@ fn notification_report(block: &str) -> Option<(String, String)> {
         .and_then(|(_, rest)| rest.split_once('"'))
         .map_or("agent", |(name, _)| name);
     Some((name.to_string(), text.to_string()))
+}
+
+/// Splits at the first `>` outside a quoted attribute value.
+fn split_header(block: &str) -> Option<(&str, &str)> {
+    let mut quoted = false;
+    let end = block.find(|c| {
+        if c == '"' {
+            quoted = !quoted;
+        }
+        c == '>' && !quoted
+    })?;
+    Some((&block[..end], &block[end + 1..]))
 }
 
 fn attr<'a>(header: &'a str, name: &str) -> Option<&'a str> {
@@ -859,6 +877,14 @@ mod tests {
     }
 
     #[test]
+    fn quoted_gt_does_not_end_teammate_header() {
+        let s = parse_all(&[user(json!(
+            "<teammate-message teammate_id=\"a\" summary=\"a -> b\">\nreport\n</teammate-message>"
+        ))]);
+        assert_eq!(lines(&s), ["report a: report"]);
+    }
+
+    #[test]
     fn prose_mentioning_a_tag_name_is_user_text() {
         let s = parse_all(&[user(json!("Fix the bug in teammate-message handler"))]);
         assert_eq!(lines(&s), ["user: Fix the bug in teammate-message handler"]);
@@ -1129,6 +1155,14 @@ mod tests {
     }
 
     #[test]
+    fn bash_notification_is_dropped() {
+        let s = parse_all(&[user(json!(
+            "<bash-notification>\n<shell-id>b1</shell-id>\n<status>failed</status>\n<summary>Background command failed</summary>\n</bash-notification>\nnext step"
+        ))]);
+        assert_eq!(lines(&s), ["user: next step"]);
+    }
+
+    #[test]
     fn reminder_only_message_has_no_entry() {
         let s = parse_all(&[user(json!("<system-reminder>only tags</system-reminder>"))]);
         assert!(s.entries.is_empty());
@@ -1361,7 +1395,6 @@ mod tests {
         );
     }
 
-    // Entries stay in file order.
     #[test]
     fn realistic_conversation_keeps_file_order() {
         let s = parse_all(&[
