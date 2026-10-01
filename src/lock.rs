@@ -8,6 +8,12 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 pub const TIMEOUT: Duration = Duration::from_secs(10);
+/// The wait a test gives a lock it expects to be free. A child process
+/// spawned by another test, such as insta's `cargo metadata`, briefly
+/// holds copies of this process's descriptors, so a free lock can read
+/// as held for an instant.
+#[cfg(test)]
+pub const FREE: Duration = Duration::from_secs(2);
 const RETRY: Duration = Duration::from_millis(50);
 
 /// Held until dropped. The OS releases it when the process exits, so a
@@ -91,10 +97,10 @@ mod tests {
     fn second_acquire_waits_for_the_first() {
         let tmp = tempfile::tempdir().unwrap();
         let path = tmp.path().join("x.lock");
-        let first = acquire(&path, Duration::ZERO).unwrap();
+        let first = acquire(&path, FREE).unwrap();
         assert!(matches!(acquire(&path, Duration::ZERO), Err(Error::Locked)));
         drop(first);
-        let _lock = acquire(&path, Duration::ZERO).unwrap();
+        let _lock = acquire(&path, FREE).unwrap();
     }
 
     #[test]

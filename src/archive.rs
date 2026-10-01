@@ -757,7 +757,7 @@ mod tests {
     fn lock_creates_its_folder() {
         let tmp = tempfile::tempdir().unwrap();
         let path = tmp.path().join("state/ganymede/archive.lock");
-        let _lock = lock_within(&path, Duration::ZERO).unwrap();
+        let _lock = lock_within(&path, lock::FREE).unwrap();
         assert!(path.is_file());
     }
 
@@ -773,7 +773,7 @@ mod tests {
         ));
         assert!(start.elapsed() >= Duration::from_millis(120));
         drop(held);
-        let _lock = lock_within(&path, Duration::ZERO).unwrap();
+        let _lock = lock_within(&path, lock::FREE).unwrap();
     }
 
     #[test]
@@ -786,7 +786,7 @@ mod tests {
             Err(Error::Locked)
         ));
         drop(first);
-        let _lock = lock_within(&path, Duration::ZERO).unwrap();
+        let _lock = lock_within(&path, lock::FREE).unwrap();
     }
 
     #[test]

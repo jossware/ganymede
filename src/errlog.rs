@@ -32,7 +32,7 @@ pub enum Stage {
 }
 
 impl Stage {
-    fn as_str(self) -> &'static str {
+    pub(crate) fn as_str(self) -> &'static str {
         match self {
             Stage::Payload => "payload",
             Stage::Detect => "detect",
@@ -250,7 +250,7 @@ fn parse(text: &[u8]) -> impl Iterator<Item = Entry> + '_ {
 }
 
 /// At most `max` bytes of `s`, cut on a char boundary and marked.
-fn clip(s: &str, max: usize) -> Cow<'_, str> {
+pub(crate) fn clip(s: &str, max: usize) -> Cow<'_, str> {
     if s.len() <= max {
         return Cow::Borrowed(s);
     }
@@ -258,11 +258,11 @@ fn clip(s: &str, max: usize) -> Cow<'_, str> {
 }
 
 /// An error as one short line, to fit in an alert.
-fn brief(s: &str) -> String {
+pub(crate) fn brief(s: &str) -> String {
     clip(&one_line(s), MAX_BRIEF).into_owned()
 }
 
-fn one_line(s: &str) -> String {
+pub(crate) fn one_line(s: &str) -> String {
     s.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
@@ -304,7 +304,7 @@ mod tests {
                 Path::new(HOME),
                 entry,
                 MAX_LEN,
-                Duration::ZERO,
+                lock::FREE,
                 &mut io::sink(),
             )
         }
@@ -546,7 +546,7 @@ mod tests {
         let log = home.join(".local/state/ganymede/errors.jsonl");
         let e = Entry::new(Stage::Parse, "bad\n  line\tthree".into());
         assert_eq!(
-            record_within(&log, home, &e, MAX_LEN, Duration::ZERO, &mut io::sink()),
+            record_within(&log, home, &e, MAX_LEN, lock::FREE, &mut io::sink()),
             Alert::Yes(
                 "ganymede: couldn't archive this session (parse: bad line three). \
                  Details: ~/.local/state/ganymede/errors.jsonl"
@@ -586,9 +586,15 @@ mod tests {
     #[test]
     fn fallback_alert_clips_a_long_error() {
         let env = Env::new();
-        let _held =
-            lock::acquire(&env.log().with_file_name("errors.lock"), Duration::ZERO).unwrap();
-        let alert = env.record(&long_error());
+        let _held = lock::acquire(&env.log().with_file_name("errors.lock"), lock::FREE).unwrap();
+        let alert = record_within(
+            &env.log(),
+            Path::new(HOME),
+            &long_error(),
+            MAX_LEN,
+            Duration::ZERO,
+            &mut io::sink(),
+        );
         assert!(is_fallback(&alert), "{alert:?}");
         assert_brief(&alert);
     }
@@ -614,7 +620,7 @@ mod tests {
             Path::new(HOME),
             e,
             max_len,
-            Duration::ZERO,
+            lock::FREE,
             &mut io::sink(),
         )
     }
@@ -828,7 +834,7 @@ mod tests {
                 Path::new(HOME),
                 &e,
                 MAX_LEN,
-                Duration::ZERO,
+                lock::FREE,
                 &mut stderr,
             );
             assert!(is_fallback(&alert), "{alert:?}");
@@ -844,9 +850,15 @@ mod tests {
     #[test]
     fn held_lock_falls_back() {
         let env = Env::new();
-        let _held =
-            lock::acquire(&env.log().with_file_name("errors.lock"), Duration::ZERO).unwrap();
-        let alert = env.record(&entry(Stage::Parse, Some("s"), None));
+        let _held = lock::acquire(&env.log().with_file_name("errors.lock"), lock::FREE).unwrap();
+        let alert = record_within(
+            &env.log(),
+            Path::new(HOME),
+            &entry(Stage::Parse, Some("s"), None),
+            MAX_LEN,
+            Duration::ZERO,
+            &mut io::sink(),
+        );
         assert!(is_fallback(&alert), "{alert:?}");
         assert!(!env.log().exists());
     }
@@ -854,8 +866,7 @@ mod tests {
     #[test]
     fn fallback_writes_the_failure_and_the_entry_to_stderr() {
         let env = Env::new();
-        let _held =
-            lock::acquire(&env.log().with_file_name("errors.lock"), Duration::ZERO).unwrap();
+        let _held = lock::acquire(&env.log().with_file_name("errors.lock"), lock::FREE).unwrap();
         let e = entry(Stage::Parse, Some("s"), None);
         let mut stderr = Vec::new();
         let _ = record_within(
