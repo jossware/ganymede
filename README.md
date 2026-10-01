@@ -219,7 +219,8 @@ code.
 A hook that fails still exits 0, so failures go to a log instead:
 
 ```
-$XDG_STATE_HOME/ganymede/errors.jsonl   # default ~/.local/state/ganymede/
+$XDG_STATE_HOME/ganymede/errors.jsonl
+~/.local/state/ganymede/errors.jsonl    # when XDG_STATE_HOME is unset
 ```
 
 Each line is one JSON object:
