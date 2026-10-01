@@ -131,7 +131,7 @@ fn record_within(
     max_len: usize,
     timeout: Duration,
 ) -> Alert {
-    match append(log, entry, max_len, timeout) {
+    match check_seen_and_append(log, entry, max_len, timeout) {
         Ok(true) => Alert::No,
         Ok(false) => Alert::Yes(format!(
             "ganymede: couldn't archive this session ({}: {}). Details: {}",
@@ -161,7 +161,12 @@ fn record_within(
 }
 
 /// Returns whether an earlier entry already alerted for this one.
-fn append(log: &Path, entry: &Entry, max_len: usize, timeout: Duration) -> Result<bool, Failure> {
+fn check_seen_and_append(
+    log: &Path,
+    entry: &Entry,
+    max_len: usize,
+    timeout: Duration,
+) -> Result<bool, Failure> {
     let _lock = lock::acquire(&log.with_file_name("errors.lock"), timeout)?;
     let mut text = read(log).map_err(io_at(log))?;
     let seen = key(entry).is_some_and(|k| {
