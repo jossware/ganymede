@@ -1,8 +1,9 @@
 //! Where a session's note lives, and writing it there.
 
 use std::fmt;
-use std::fs::{self, File, OpenOptions};
-use std::io::{self, Read};
+use std::fs::{self, File, OpenOptions, Permissions};
+use std::io::{self, Read, Write};
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime};
@@ -14,6 +15,9 @@ use crate::session::Session;
 use crate::title;
 
 const MAX_FRONTMATTER_LINES: usize = 64;
+const TEMP_PREFIX: &str = ".ganymede-";
+const TEMP_SUFFIX: &str = ".tmp";
+const NEW_NOTE_MODE: u32 = 0o644;
 pub const LOCK_TIMEOUT: Duration = Duration::from_secs(10);
 const LOCK_RETRY: Duration = Duration::from_millis(50);
 /// Enough for any frontmatter block, without reading a whole note.
@@ -277,6 +281,52 @@ fn lock_within(path: &Path, timeout: Duration) -> Result<Lock, Error> {
     }
 }
 
+/// Replaces `target` atomically. `mode` is the rewritten note's; `None`
+/// marks a first write, which never replaces an existing file.
+fn write(target: &Path, text: &str, mode: Option<u32>) -> Result<(), Error> {
+    let dir = target.parent().unwrap_or(Path::new("."));
+    sweep(dir);
+    let mut tmp = tempfile::Builder::new()
+        .prefix(TEMP_PREFIX)
+        .suffix(TEMP_SUFFIX)
+        .tempfile_in(dir)
+        .map_err(io_at(dir))?;
+    let tmp_path = tmp.path().to_path_buf();
+    let file = tmp.as_file_mut();
+    let perms = Permissions::from_mode(mode.unwrap_or(NEW_NOTE_MODE));
+    file.write_all(text.as_bytes())
+        .and_then(|()| file.set_permissions(perms))
+        .and_then(|()| file.sync_all())
+        .map_err(io_at(&tmp_path))?;
+    let persisted = match mode {
+        Some(_) => tmp.persist(target),
+        None => tmp.persist_noclobber(target),
+    };
+    match persisted {
+        Ok(_) => Ok(()),
+        Err(e) if mode.is_none() && e.error.kind() == io::ErrorKind::AlreadyExists => {
+            Err(Error::Taken(target.to_path_buf()))
+        }
+        Err(e) => Err(io_at(target)(e.error)),
+    }
+}
+
+/// Only a killed run leaves a temp file behind: a live one holds the lock.
+fn sweep(dir: &Path) {
+    let Ok(entries) = fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let stale = entry
+            .file_name()
+            .to_str()
+            .is_some_and(|n| n.starts_with(TEMP_PREFIX) && n.ends_with(TEMP_SUFFIX));
+        if stale {
+            let _ = fs::remove_file(entry.path());
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::fs::FileTimes;
@@ -288,6 +338,10 @@ mod tests {
     use crate::session::Entry;
 
     const ID: &str = "5f0c2a1e-7b3d-4c9a-9e21-3d4b5a6c7d8e";
+
+    fn mode_of(path: &Path) -> u32 {
+        fs::metadata(path).unwrap().permissions().mode() & 0o7777
+    }
 
     fn set_mtime(path: &Path, secs: u64) {
         let t = SystemTime::UNIX_EPOCH + Duration::from_secs(secs);
@@ -635,5 +689,57 @@ mod tests {
             matches!(&err, Error::Io { path: p, .. } if *p == blocker),
             "{err}"
         );
+    }
+
+    // --- write ---
+
+    fn leftovers(dir: &Path) -> Vec<String> {
+        let mut names: Vec<String> = fs::read_dir(dir)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().into_string().unwrap())
+            .filter(|n| n.starts_with('.'))
+            .collect();
+        names.sort();
+        names
+    }
+
+    #[test]
+    fn first_write_is_0644_and_leaves_no_temp_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("n.md");
+        write(&path, "hello\n", None).unwrap();
+        assert_eq!(fs::read_to_string(&path).unwrap(), "hello\n");
+        assert_eq!(mode_of(&path), 0o644);
+        assert!(leftovers(tmp.path()).is_empty());
+    }
+
+    #[test]
+    fn first_write_never_replaces() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = put(tmp.path(), "n.md", "theirs\n");
+        assert!(matches!(write(&path, "ours\n", None), Err(Error::Taken(p)) if p == path));
+        assert_eq!(fs::read_to_string(&path).unwrap(), "theirs\n");
+        assert!(leftovers(tmp.path()).is_empty());
+    }
+
+    #[test]
+    fn rewrite_keeps_mode() {
+        let tmp = tempfile::tempdir().unwrap();
+        for mode in [0o600, 0o644] {
+            let path = put(tmp.path(), "n.md", "old\n");
+            fs::set_permissions(&path, Permissions::from_mode(mode)).unwrap();
+            write(&path, "new\n", Some(mode)).unwrap();
+            assert_eq!(fs::read_to_string(&path).unwrap(), "new\n");
+            assert_eq!(mode_of(&path), mode);
+        }
+    }
+
+    #[test]
+    fn write_sweeps_stale_temp_files_only() {
+        let tmp = tempfile::tempdir().unwrap();
+        put(tmp.path(), ".ganymede-x.tmp", "stale");
+        put(tmp.path(), ".other", "keep");
+        write(&tmp.path().join("n.md"), "x\n", None).unwrap();
+        assert_eq!(leftovers(tmp.path()), [".other"]);
     }
 }
