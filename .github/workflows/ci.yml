@@ -9,18 +9,22 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
+env:
+  # Bump to rotate the cache when the archive outgrows its budget.
+  NIX_CACHE_PREFIX: nix-v1-Linux-
+
 jobs:
   check:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     permissions:
       contents: read
-      actions: write
-    env:
-      # Bump to rotate the cache when the archive outgrows its budget.
-      NIX_CACHE_PREFIX: nix-v1-Linux-
+    outputs:
+      nix-key: ${{ steps.nix-key.outputs.key }}
     steps:
       - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
 
       # Ubuntu's AppArmor blocks the unprivileged user namespaces that
       # single-user Nix needs for its sandbox.
@@ -35,16 +39,15 @@ jobs:
             sandbox = true
             sandbox-fallback = false
 
+      - id: nix-key
+        run: echo "key=$NIX_CACHE_PREFIX${{ hashFiles('flake.nix', 'flake.lock', 'Cargo.lock') }}" >> "$GITHUB_OUTPUT"
+
       - uses: nix-community/cache-nix-action@v7
         with:
-          primary-key: ${{ env.NIX_CACHE_PREFIX }}${{ hashFiles('flake.nix', 'flake.lock', 'Cargo.lock') }}
+          primary-key: ${{ steps.nix-key.outputs.key }}
           restore-prefixes-first-match: ${{ env.NIX_CACHE_PREFIX }}
           # PR scopes are unreadable from main, so a PR save is pure cost.
           save: ${{ github.ref == 'refs/heads/main' }}
-          purge: ${{ github.ref == 'refs/heads/main' }}
-          purge-prefixes: ${{ env.NIX_CACHE_PREFIX }}
-          purge-created: 0
-          purge-primary-key: never
 
       # Swatinem/rust-cache probes cargo on PATH, which only nix develop provides.
       - uses: actions/cache@v6
@@ -60,3 +63,22 @@ jobs:
       - run: nix develop -c cargo clippy --locked --all-targets -- -D warnings
       - run: nix develop -c cargo test --locked
       - run: nix build -L
+
+  # A separate job so that PR runs, which execute untrusted build scripts
+  # and tests, never hold a token that can delete caches.
+  purge-nix-cache:
+    needs: check
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      actions: write
+    steps:
+      - env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          KEEP: ${{ needs.check.outputs.nix-key }}
+        run: |
+          gh cache list --key "$NIX_CACHE_PREFIX" --limit 100 --json id,key \
+            --jq '.[] | select(.key != env.KEEP) | .id' |
+            xargs -r -n1 gh cache delete
