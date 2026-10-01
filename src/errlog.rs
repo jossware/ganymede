@@ -580,6 +580,21 @@ mod tests {
     }
 
     #[test]
+    fn rotation_keeping_a_torn_line_starts_a_new_line() {
+        let env = Env::new();
+        let text: String = ["a", "b", "c", "d"]
+            .map(|s| line(&entry(Stage::Parse, Some(s), None)))
+            .concat();
+        seed(&env, &format!("{text}{{\"ts\":\"20"));
+        let len = fs::metadata(env.log()).unwrap().len() as usize;
+        let _ = record_small(&env, &entry(Stage::Parse, Some("e"), None), len - 1);
+        let lines = env.lines();
+        assert!(!lines[0].contains("\"a\""), "did not rotate");
+        assert_eq!(lines[lines.len() - 2], "{\"ts\":\"20");
+        assert!(lines[lines.len() - 1].contains("\"e\""));
+    }
+
+    #[test]
     fn one_huge_line_empties_the_log() {
         let env = Env::new();
         seed(&env, &"x".repeat(100));
