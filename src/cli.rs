@@ -85,8 +85,11 @@ pub fn is_hook(args: &[OsString]) -> bool {
         if !arg.starts_with('-') {
             return arg == "hook";
         }
-        if !arg.contains('=') && takes_value(&arg) {
-            rest.next();
+        // `--dir hook` is either a value or a missing value before the
+        // subcommand. Read it as the subcommand: failing the harness costs
+        // more than mistaking a malformed manual run for a hook.
+        if !arg.contains('=') && takes_value(&arg) && rest.next().is_some_and(|v| v == "hook") {
+            return true;
         }
     }
     false
@@ -136,5 +139,7 @@ mod tests {
         ])));
         assert!(is_hook(&args(&["ganymede", "--dir=/x", "hook"])));
         assert!(is_hook(&args(&["ganymede", "--thinking", "false", "hook"])));
+        assert!(is_hook(&args(&["ganymede", "--dir", "hook"])));
+        assert!(is_hook(&args(&["ganymede", "--thinking", "hook"])));
     }
 }
