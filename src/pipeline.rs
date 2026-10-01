@@ -73,6 +73,7 @@ pub fn archive(req: &Request) -> Result<Outcome, Error> {
 mod tests {
     use std::fs::{self, OpenOptions};
     use std::io::Write;
+    use std::sync::mpsc;
     use std::thread;
     use std::time::Duration;
 
@@ -140,6 +141,7 @@ mod tests {
         let held = archive::lock(&lock_path).unwrap();
 
         let dir = tmp.path().to_path_buf();
+        let (started, start) = mpsc::channel();
         let worker = {
             let transcript = transcript.clone();
             thread::spawn(move || {
@@ -153,12 +155,14 @@ mod tests {
                     opts: &opts,
                     home: &dir,
                 };
+                started.send(()).unwrap();
                 archive(&req).map(|outcome| match outcome {
                     Outcome::Saved { path, .. } => path,
                     other => panic!("expected a saved note, got {other:?}"),
                 })
             })
         };
+        start.recv().unwrap();
         // Well past the lock's 50 ms retry, so the worker is waiting on it.
         thread::sleep(Duration::from_millis(500));
         assert!(!worker.is_finished(), "worker ran without the lock");
