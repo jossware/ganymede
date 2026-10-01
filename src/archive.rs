@@ -11,6 +11,8 @@ use std::time::{Duration, Instant, SystemTime};
 use jiff::Timestamp;
 use jiff::tz::TimeZone;
 
+use crate::project;
+use crate::render;
 use crate::session::Session;
 use crate::title;
 
@@ -61,6 +63,44 @@ impl std::error::Error for Error {
 fn io_at(path: &Path) -> impl FnOnce(io::Error) -> Error + use<> {
     let path = path.to_path_buf();
     move |source| Error::Io { path, source }
+}
+
+/// Writes the session's note under `dir` and returns its path. Holding
+/// `_lock` is the caller's proof that no other run is mid-save.
+pub fn save(
+    _lock: &Lock,
+    dir: &Path,
+    session: &Session,
+    opts: &render::Options,
+    home: &Path,
+) -> Result<PathBuf, Error> {
+    let id8 = id8(&session.id)?;
+    // A missing vault or a mistyped --dir must not grow an unsynced archive.
+    if !dir.is_dir() {
+        return Err(io_at(dir)(io::ErrorKind::NotFound.into()));
+    }
+    let harness_dir = dir.join(session.harness.display());
+    let found = find(&harness_dir, &session.id, &id8)?;
+    let pinned = found.as_ref().and_then(|f| f.project.as_deref());
+    let id = project::identify(&session.cwds, pinned, home);
+    let text = render::note(session, &id.name, id.worktree.as_deref(), opts);
+    match found {
+        Some(found) => {
+            let mode = fs::metadata(&found.path)
+                .map_err(io_at(&found.path))?
+                .permissions()
+                .mode();
+            write(&found.path, &text, Some(mode & 0o7777))?;
+            Ok(found.path)
+        }
+        None => {
+            let folder = harness_dir.join(&id.name);
+            fs::create_dir_all(&folder).map_err(io_at(&folder))?;
+            let path = folder.join(file_name(session, &id8, &opts.tz));
+            write(&path, &text, None)?;
+            Ok(path)
+        }
+    }
 }
 
 /// The id's first 8 characters, when they are safe in a filename.
@@ -330,8 +370,10 @@ fn sweep(dir: &Path) {
 #[cfg(test)]
 mod tests {
     use std::fs::FileTimes;
+    use std::slice;
 
     use jiff::tz::Offset;
+    use tempfile::TempDir;
 
     use super::*;
     use crate::harness::Harness;
@@ -741,5 +783,198 @@ mod tests {
         put(tmp.path(), ".other", "keep");
         write(&tmp.path().join("n.md"), "x\n", None).unwrap();
         assert_eq!(leftovers(tmp.path()), [".other"]);
+    }
+
+    // --- save ---
+
+    struct Env {
+        tmp: TempDir,
+    }
+
+    impl Env {
+        fn new() -> Self {
+            let env = Env {
+                tmp: tempfile::tempdir().unwrap(),
+            };
+            fs::create_dir_all(env.archive()).unwrap();
+            fs::create_dir_all(env.home()).unwrap();
+            env
+        }
+
+        fn archive(&self) -> PathBuf {
+            self.tmp.path().join("AI")
+        }
+
+        fn home(&self) -> PathBuf {
+            self.tmp.path().join("home")
+        }
+
+        fn lock(&self) -> PathBuf {
+            self.tmp.path().join("state/archive.lock")
+        }
+
+        /// A cwd outside any repository, so its basename is the project.
+        fn cwd(&self, name: &str) -> PathBuf {
+            let dir = self.tmp.path().join("work").join(name);
+            fs::create_dir_all(&dir).unwrap();
+            dir
+        }
+
+        fn save(&self, s: &Session) -> Result<PathBuf, Error> {
+            let lock = lock(&self.lock()).unwrap();
+            save(&lock, &self.archive(), s, &opts(), &self.home())
+        }
+
+        fn notes(&self) -> Vec<PathBuf> {
+            let mut out = Vec::new();
+            let Ok(folders) = fs::read_dir(self.archive().join("Claude")) else {
+                return out;
+            };
+            for folder in folders {
+                for note in fs::read_dir(folder.unwrap().path()).unwrap() {
+                    out.push(note.unwrap().path());
+                }
+            }
+            out.sort();
+            out
+        }
+    }
+
+    fn opts() -> render::Options {
+        render::Options {
+            thinking: true,
+            tool_output: true,
+            max_lines: 100,
+            tz: tz(),
+        }
+    }
+
+    fn session(id: &str, cwd: &Path, start: &str) -> Session {
+        let mut s = Session::new(Harness::Claude, "/t/transcript.jsonl".into());
+        s.id = id.into();
+        s.started_at = Some(ts(start));
+        s.title_source = Some("Fix the archive".into());
+        s.add_cwd(cwd.into());
+        s.entries = vec![user(s.started_at)];
+        s
+    }
+
+    #[test]
+    fn first_save_computes_the_path() {
+        let env = Env::new();
+        let s = session(ID, &env.cwd("alpha"), "2026-09-04T14:00:00Z");
+        let path = env.save(&s).unwrap();
+        assert_eq!(
+            path,
+            env.archive()
+                .join("Claude/alpha/2026-09-04-fix-the-archive-5f0c2a1e.md")
+        );
+        let text = fs::read_to_string(&path).unwrap();
+        assert!(text.contains("\nproject: alpha\n"), "{text}");
+        assert!(text.contains(&format!("\nsession: {ID}\n")), "{text}");
+        assert_eq!(mode_of(&path), 0o644);
+    }
+
+    #[test]
+    fn rewrite_stays_put_and_keeps_project() {
+        let env = Env::new();
+        let first = env
+            .save(&session(ID, &env.cwd("alpha"), "2026-09-04T14:00:00Z"))
+            .unwrap();
+        let mut later = session(ID, &env.cwd("beta"), "2026-09-04T14:00:00Z");
+        later.started_at = Some(ts("2026-09-06T14:00:00Z"));
+        later.entries.push(user(Some(ts("2026-09-06T15:00:00Z"))));
+        assert_eq!(env.save(&later).unwrap(), first);
+        assert_eq!(env.notes(), slice::from_ref(&first));
+        let text = fs::read_to_string(&first).unwrap();
+        assert!(text.contains("\nproject: alpha\n"), "{text}");
+        assert!(text.contains("2026-09-06"), "{text}");
+    }
+
+    #[test]
+    fn rewrite_finds_note_in_another_folder_with_quoted_project() {
+        let env = Env::new();
+        let old = put(
+            &env.archive(),
+            "Claude/2048/2026-08-01-old-5f0c2a1e.md",
+            &note(ID, "\"2048\""),
+        );
+        fs::set_permissions(&old, Permissions::from_mode(0o600)).unwrap();
+        let s = session(ID, &env.cwd("beta"), "2026-09-04T14:00:00Z");
+        assert_eq!(env.save(&s).unwrap(), old);
+        assert_eq!(env.notes(), slice::from_ref(&old));
+        let text = fs::read_to_string(&old).unwrap();
+        assert!(text.contains("\nproject: \"2048\"\n"), "{text}");
+        assert_eq!(mode_of(&old), 0o600);
+    }
+
+    #[test]
+    fn rewrite_picks_newest_duplicate() {
+        let env = Env::new();
+        let a = put(
+            &env.archive(),
+            "Claude/a/2026-09-01-x-5f0c2a1e.md",
+            &note(ID, "a"),
+        );
+        let b = put(
+            &env.archive(),
+            "Claude/b/2026-09-02-y-5f0c2a1e.md",
+            &note(ID, "b"),
+        );
+        set_mtime(&a, 1_000);
+        set_mtime(&b, 2_000);
+        let s = session(ID, &env.cwd("alpha"), "2026-09-04T14:00:00Z");
+        assert_eq!(env.save(&s).unwrap(), b);
+        assert_eq!(fs::read_to_string(&a).unwrap(), note(ID, "a"));
+        assert_eq!(
+            fs::metadata(&a).unwrap().modified().unwrap(),
+            SystemTime::UNIX_EPOCH + Duration::from_secs(1_000)
+        );
+        assert!(fs::read_to_string(&b).unwrap().contains("\nproject: b\n"));
+    }
+
+    #[test]
+    fn first_save_onto_another_sessions_note_is_taken() {
+        let env = Env::new();
+        let rel = "Claude/alpha/2026-09-04-fix-the-archive-5f0c2a1e.md";
+        let theirs = put(&env.archive(), rel, &note("5f0c2a1e-other", "alpha"));
+        let s = session(ID, &env.cwd("alpha"), "2026-09-04T14:00:00Z");
+        assert!(matches!(env.save(&s), Err(Error::Taken(p)) if p == theirs));
+        assert_eq!(
+            fs::read_to_string(&theirs).unwrap(),
+            note("5f0c2a1e-other", "alpha")
+        );
+    }
+
+    #[test]
+    fn rejected_saves_create_nothing() {
+        let env = Env::new();
+        for id in ["ab/cd1234", ""] {
+            let s = session(id, &env.cwd("alpha"), "2026-09-04T14:00:00Z");
+            assert!(matches!(env.save(&s), Err(Error::BadId(_))), "{id:?}");
+        }
+        assert!(!env.archive().join("Claude").exists());
+
+        let missing = env.tmp.path().join("nope");
+        let s = session(ID, &env.cwd("alpha"), "2026-09-04T14:00:00Z");
+        let lock = lock(&env.lock()).unwrap();
+        let err = save(&lock, &missing, &s, &opts(), &env.home()).unwrap_err();
+        assert!(
+            matches!(&err, Error::Io { path, .. } if *path == missing),
+            "{err}"
+        );
+        assert!(!missing.exists());
+    }
+
+    #[test]
+    fn save_without_cwds_files_under_unknown() {
+        let env = Env::new();
+        let mut s = session(ID, &env.cwd("alpha"), "2026-09-04T14:00:00Z");
+        s.cwds.clear();
+        assert_eq!(
+            env.save(&s).unwrap(),
+            env.archive()
+                .join("Claude/unknown/2026-09-04-fix-the-archive-5f0c2a1e.md")
+        );
     }
 }
