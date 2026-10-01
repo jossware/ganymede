@@ -78,7 +78,9 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
           KEEP: ${{ needs.check.outputs.nix-key }}
+        # Collect every page before deleting; deletion shifts later pages.
         run: |
-          gh cache list --key "$NIX_CACHE_PREFIX" --limit 100 --json id,key \
-            --jq '.[] | select(.key != env.KEEP) | .id' |
-            xargs -r -n1 gh cache delete
+          ids=$(gh api --paginate \
+            "repos/$GH_REPO/actions/caches?key=$NIX_CACHE_PREFIX&per_page=100" \
+            --jq '.actions_caches[] | select(.key != env.KEEP) | .id')
+          for id in $ids; do gh cache delete "$id"; done
