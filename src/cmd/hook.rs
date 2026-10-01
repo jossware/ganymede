@@ -19,6 +19,10 @@ use crate::harness::{self, Detected, LoadError, Records};
 use crate::paths::{self, Env};
 use crate::pipeline::{self, Outcome, Request};
 
+/// Bound on a payload field as logged. PATH_MAX is 1024 on macOS and
+/// 4096 on Linux, and session ids are far shorter.
+const MAX_FIELD: usize = 4096;
+
 /// What the error log should say about the run so far.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Context {
@@ -64,15 +68,16 @@ fn read_payload(input: &[u8]) -> (Context, Result<PathBuf, String>) {
             .and_then(|o| o.get(key))
             .and_then(Value::as_str)
             .filter(|s| !s.is_empty())
-            .map(str::to_string)
     };
+    // The log is capped, and a malformed payload must not fill it.
+    let logged = |key: &str| text(key).map(|s| errlog::clip(s, MAX_FIELD).into_owned());
     let ctx = Context {
         harness: None,
-        event: text("hook_event_name"),
-        session: text("session_id"),
-        transcript: text("transcript_path"),
+        event: logged("hook_event_name"),
+        session: logged("session_id"),
+        transcript: logged("transcript_path"),
     };
-    let transcript = match (&value, object, &ctx.transcript) {
+    let transcript = match (&value, object, text("transcript_path")) {
         (Err(e), _, _) => Err(format!("payload is not JSON: {e}")),
         (Ok(_), None, _) => Err("payload is not a JSON object".to_string()),
         (Ok(_), Some(_), None) => Err("payload has no transcript_path".to_string()),
@@ -311,6 +316,23 @@ mod tests {
             let e = transcript.unwrap_err();
             assert!(e.starts_with(why), "{e:?} for {input:?}");
         }
+    }
+
+    #[test]
+    fn bounds_payload_fields_for_the_log() {
+        let huge = "x".repeat(1 << 20);
+        let input = serde_json::json!({
+            "session_id": huge,
+            "hook_event_name": huge,
+            "transcript_path": huge,
+        })
+        .to_string();
+        let (ctx, transcript) = read_payload(input.as_bytes());
+        for field in [&ctx.session, &ctx.event, &ctx.transcript] {
+            let len = field.as_ref().unwrap().len();
+            assert!(len < 2 * MAX_FIELD, "{len} bytes");
+        }
+        assert_eq!(transcript.unwrap().as_os_str().len(), huge.len());
     }
 
     #[test]

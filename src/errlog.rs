@@ -250,7 +250,7 @@ fn parse(text: &[u8]) -> impl Iterator<Item = Entry> + '_ {
 }
 
 /// At most `max` bytes of `s`, cut on a char boundary and marked.
-fn clip(s: &str, max: usize) -> Cow<'_, str> {
+pub(crate) fn clip(s: &str, max: usize) -> Cow<'_, str> {
     if s.len() <= max {
         return Cow::Borrowed(s);
     }
