@@ -3,6 +3,7 @@
 use std::fmt;
 use std::fs::{self, OpenOptions};
 use std::io::{self, Write};
+use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -12,6 +13,8 @@ use serde::{Deserialize, Serialize};
 use crate::lock;
 
 const MAX_LEN: usize = 1024 * 1024;
+/// Entries carry session ids and transcript paths.
+const LOG_MODE: u32 = 0o600;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -175,6 +178,7 @@ fn append(log: &Path, entry: &Entry, max_len: usize, timeout: Duration) -> Resul
     OpenOptions::new()
         .create(true)
         .append(true)
+        .mode(LOG_MODE)
         .open(log)
         .and_then(|mut f| f.write_all(&line))
         .map_err(io_at(log))?;
@@ -458,6 +462,14 @@ mod tests {
         assert!(is_yes(&env.record(&entry(Stage::Parse, Some("s"), None))));
         assert_eq!(env.record(&entry(Stage::Parse, Some("s"), None)), Alert::No);
         assert_eq!(env.lines().len(), 3);
+    }
+
+    #[test]
+    fn log_is_private_from_the_first_write() {
+        let env = Env::new();
+        env.record(&entry(Stage::Parse, Some("s"), None));
+        let mode = fs::metadata(env.log()).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600, "{mode:o}");
     }
 
     // --- alert text ---
