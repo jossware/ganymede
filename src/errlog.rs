@@ -1,5 +1,6 @@
 //! The error log, and whether a failure earns an alert.
 
+use std::borrow::Cow;
 use std::fmt;
 use std::fs::{self, OpenOptions};
 use std::io::{self, Write};
@@ -15,6 +16,7 @@ use crate::lock;
 const MAX_LEN: usize = 1024 * 1024;
 const MAX_ERROR: usize = 8 * 1024;
 const TRUNCATED: &str = " …(truncated)";
+const MAX_BRIEF: usize = 200;
 /// Entries carry session ids and transcript paths.
 const LOG_MODE: u32 = 0o600;
 
@@ -140,7 +142,7 @@ fn record_within(
         Ok(false) => Alert::Yes(format!(
             "ganymede: couldn't archive this session ({}: {}). Details: {}",
             entry.stage.as_str(),
-            one_line(&entry.error),
+            brief(&entry.error),
             tilde(log, home),
         )),
         Err(failure) => {
@@ -156,8 +158,8 @@ fn record_within(
             Alert::Yes(format!(
                 "ganymede: couldn't archive this session ({}: {}). The error log also failed ({}).",
                 entry.stage.as_str(),
-                one_line(&entry.error),
-                one_line(&failure.to_string()),
+                brief(&entry.error),
+                brief(&failure.to_string()),
             ))
         }
     }
@@ -197,14 +199,12 @@ fn check_seen_and_append(
 /// Serializes `entry` with a trailing newline, clipping its error so one
 /// entry cannot crowd the rest out of the log.
 fn to_line(entry: &Entry) -> serde_json::Result<Vec<u8>> {
-    let mut line = if entry.error.len() > MAX_ERROR {
-        let end = entry.error.floor_char_boundary(MAX_ERROR);
-        serde_json::to_vec(&Entry {
-            error: format!("{}{TRUNCATED}", &entry.error[..end]),
+    let mut line = match clip(&entry.error, MAX_ERROR) {
+        Cow::Borrowed(_) => serde_json::to_vec(entry)?,
+        Cow::Owned(error) => serde_json::to_vec(&Entry {
+            error,
             ..entry.clone()
-        })?
-    } else {
-        serde_json::to_vec(entry)?
+        })?,
     };
     line.push(b'\n');
     Ok(line)
@@ -247,6 +247,19 @@ fn read(log: &Path) -> io::Result<Vec<u8>> {
 fn parse(text: &[u8]) -> impl Iterator<Item = Entry> + '_ {
     text.split(|&b| b == b'\n')
         .filter_map(|line| serde_json::from_slice(line).ok())
+}
+
+/// At most `max` bytes of `s`, cut on a char boundary and marked.
+fn clip(s: &str, max: usize) -> Cow<'_, str> {
+    if s.len() <= max {
+        return Cow::Borrowed(s);
+    }
+    Cow::Owned(format!("{}{TRUNCATED}", &s[..s.floor_char_boundary(max)]))
+}
+
+/// An error as one short line, to fit in an alert.
+fn brief(s: &str) -> String {
+    clip(&one_line(s), MAX_BRIEF).into_owned()
 }
 
 fn one_line(s: &str) -> String {
@@ -542,6 +555,44 @@ mod tests {
         );
     }
 
+    fn long_error() -> Entry {
+        Entry {
+            error: "é word\n".repeat(MAX_BRIEF),
+            ..entry(Stage::Parse, None, None)
+        }
+    }
+
+    fn assert_brief(alert: &Alert) {
+        let Alert::Yes(text) = alert else {
+            panic!("{alert:?}")
+        };
+        let brief = text
+            .split_once("(parse: ")
+            .and_then(|(_, rest)| rest.split_once(TRUNCATED))
+            .expect(text)
+            .0;
+        assert!(
+            brief.len() <= MAX_BRIEF && brief.len() > MAX_BRIEF - 2,
+            "{text}"
+        );
+        assert!(one_line(&long_error().error).starts_with(brief));
+    }
+
+    #[test]
+    fn alert_clips_a_long_error() {
+        assert_brief(&Env::new().record(&long_error()));
+    }
+
+    #[test]
+    fn fallback_alert_clips_a_long_error() {
+        let env = Env::new();
+        let _held =
+            lock::acquire(&env.log().with_file_name("errors.lock"), Duration::ZERO).unwrap();
+        let alert = env.record(&long_error());
+        assert!(is_fallback(&alert), "{alert:?}");
+        assert_brief(&alert);
+    }
+
     #[test]
     fn tilde_matches_whole_components() {
         let home = Path::new("/Users/ryan");
@@ -642,8 +693,14 @@ mod tests {
     #[test]
     fn rotation_cut_on_a_line_start_keeps_that_line() {
         let env = Env::new();
+        let ts: Timestamp = "2026-10-01T00:00:00Z".parse().unwrap();
         let text: String = ["a", "b", "c", "d"]
-            .map(|s| line(&entry(Stage::Parse, Some(s), None)))
+            .map(|s| {
+                line(&Entry {
+                    ts,
+                    ..entry(Stage::Parse, Some(s), None)
+                })
+            })
             .concat();
         seed(&env, &text);
         let e = entry(Stage::Parse, Some("e"), None);
