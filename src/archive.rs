@@ -157,7 +157,13 @@ fn find(harness_dir: &Path, id: &str, id8: &str) -> Result<Option<Found>, Error>
         if !fs::metadata(&folder).is_ok_and(|m| m.is_dir()) {
             continue;
         }
-        for note in fs::read_dir(&folder).map_err(io_at(&folder))? {
+        // NotFound is a folder deleted since the listing; it holds no notes.
+        let notes = match fs::read_dir(&folder) {
+            Ok(notes) => notes,
+            Err(e) if e.kind() == io::ErrorKind::NotFound => continue,
+            Err(e) => return Err(io_at(&folder)(e)),
+        };
+        for note in notes {
             let note = note.map_err(io_at(&folder))?;
             let named = note
                 .file_name()
@@ -726,6 +732,31 @@ mod tests {
             matches!(&err, Error::Io { path: p, .. } if *p == path),
             "{err}"
         );
+    }
+
+    #[test]
+    fn find_reports_an_unreadable_folder() {
+        let tmp = tempfile::tempdir().unwrap();
+        let h = tmp.path();
+        put(h, "a/2026-09-01-x-5f0c2a1e.md", &note(ID, "a"));
+        let folder = h.join("a");
+        fs::set_permissions(&folder, Permissions::from_mode(0o000)).unwrap();
+        let result = find(h, ID, "5f0c2a1e");
+        fs::set_permissions(&folder, Permissions::from_mode(0o755)).unwrap();
+        let err = result.unwrap_err();
+        assert!(
+            matches!(&err, Error::Io { path: p, .. } if *p == folder),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn find_skips_a_broken_folder_symlink() {
+        let tmp = tempfile::tempdir().unwrap();
+        let h = tmp.path().join("Claude");
+        let want = put(&h, "b/2026-09-01-x-5f0c2a1e.md", &note(ID, "b"));
+        std::os::unix::fs::symlink(tmp.path().join("gone"), h.join("a")).unwrap();
+        assert_eq!(find(&h, ID, "5f0c2a1e").unwrap().unwrap().path, want);
     }
 
     // --- lock ---
