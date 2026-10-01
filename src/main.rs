@@ -1,5 +1,3 @@
-// Unused until the CLI saves sessions.
-#[allow(dead_code)]
 mod archive;
 mod cli;
 // Unused until the CLI records failures.
@@ -11,6 +9,11 @@ mod harness;
 // Unused until the CLI saves sessions or records failures.
 #[allow(dead_code)]
 mod lock;
+// Unused until the commands are wired.
+#[allow(dead_code)]
+mod paths;
+#[allow(dead_code)]
+mod pipeline;
 mod project;
 mod render;
 #[allow(dead_code)]
