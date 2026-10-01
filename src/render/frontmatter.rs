@@ -93,8 +93,9 @@ fn reads_as_non_string(value: &str) -> bool {
         || WORDS.iter().any(|w| value.eq_ignore_ascii_case(w))
 }
 
-/// Bare only when YAML cannot read the value as anything but this string.
-/// Dates and `date`-like values must stay bare so Bases parses them.
+/// Bare when the value uses only safe characters and starts like a plain
+/// scalar. YAML may then read a digit-led value as a number or a date;
+/// dates must stay bare so Bases parses them.
 fn scalar(value: &str) -> String {
     let bytes = value.as_bytes();
     let safe = bytes
@@ -293,8 +294,8 @@ transcript: t.jsonl
             assert_eq!(line(&fm, "project"), Some(name), "{name}");
             assert_eq!(line(&fm, "worktree"), Some(name), "{name}");
         }
-        let fm = frontmatter(&s, "2 b#c", None, &tz());
-        assert_eq!(line(&fm, "project"), Some("\"2 b#c\""));
+        let fm = frontmatter(&s, "2\"a\\b", None, &tz());
+        assert_eq!(line(&fm, "project"), Some("\"2\\\"a\\\\b\""));
     }
 
     #[test]
