@@ -749,7 +749,7 @@ mod tests {
         fs::create_dir_all(path.parent().unwrap()).unwrap();
         File::create(path).unwrap();
         let file = File::open(path).unwrap();
-        fs4::FileExt::try_lock(&file).unwrap();
+        file.try_lock().unwrap();
         file
     }
 

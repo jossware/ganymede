@@ -1,7 +1,7 @@
 //! Advisory file locks with a bounded wait.
 
 use std::fmt;
-use std::fs::{self, File, OpenOptions};
+use std::fs::{self, File, OpenOptions, TryLockError};
 use std::io;
 use std::path::{Path, PathBuf};
 use std::thread;
@@ -65,13 +65,13 @@ pub fn acquire(path: &Path, timeout: Duration) -> Result<Lock, Error> {
         .map_err(io_at(path))?;
     let deadline = Instant::now() + timeout;
     loop {
-        match fs4::FileExt::try_lock(&file) {
+        match file.try_lock() {
             Ok(()) => return Ok(Lock { _file: file }),
-            Err(fs4::TryLockError::WouldBlock) => match pause(Instant::now(), deadline) {
+            Err(TryLockError::WouldBlock) => match pause(Instant::now(), deadline) {
                 Some(wait) => thread::sleep(wait),
                 None => return Err(Error::Locked),
             },
-            Err(fs4::TryLockError::Error(e)) => return Err(io_at(path)(e)),
+            Err(TryLockError::Error(e)) => return Err(io_at(path)(e)),
         }
     }
 }
