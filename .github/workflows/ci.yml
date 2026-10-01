@@ -40,7 +40,9 @@ jobs:
             sandbox-fallback = false
 
       - id: nix-key
-        run: echo "key=$NIX_CACHE_PREFIX${{ hashFiles('flake.nix', 'flake.lock', 'Cargo.lock') }}" >> "$GITHUB_OUTPUT"
+        env:
+          HASH: ${{ hashFiles('flake.nix', 'flake.lock', 'Cargo.lock') }}
+        run: echo "key=$NIX_CACHE_PREFIX$HASH" >> "$GITHUB_OUTPUT"
 
       - uses: nix-community/cache-nix-action@v7
         with:
