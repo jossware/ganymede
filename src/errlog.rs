@@ -28,7 +28,7 @@ pub enum Stage {
 }
 
 impl Stage {
-    fn as_str(self) -> &'static str {
+    pub(crate) fn as_str(self) -> &'static str {
         match self {
             Stage::Payload => "payload",
             Stage::Detect => "detect",
@@ -228,7 +228,7 @@ fn parse(text: &[u8]) -> impl Iterator<Item = Entry> + '_ {
         .filter_map(|line| serde_json::from_slice(line).ok())
 }
 
-fn one_line(s: &str) -> String {
+pub(crate) fn one_line(s: &str) -> String {
     s.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 

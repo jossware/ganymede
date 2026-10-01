@@ -1,39 +1,65 @@
 mod archive;
 mod cli;
-// Unused until the CLI records failures.
-#[allow(dead_code)]
+mod cmd;
 mod errlog;
-// Unused until the CLI loads transcripts.
-#[allow(dead_code)]
 mod harness;
-// Unused until the CLI saves sessions or records failures.
-#[allow(dead_code)]
 mod lock;
-// Unused until the commands are wired.
-#[allow(dead_code)]
 mod paths;
-#[allow(dead_code)]
 mod pipeline;
 mod project;
 mod render;
-#[allow(dead_code)]
 mod session;
 mod title;
 
+use std::env;
+use std::io;
 use std::process::ExitCode;
 
 use clap::Parser;
+use clap::error::ErrorKind;
 
 use cli::{Cli, Command};
+use paths::Env;
 
 fn main() -> ExitCode {
-    let cli = Cli::parse();
-    match cli.command {
-        // A hook MUST NOT fail the harness.
-        Command::Hook(_) => ExitCode::SUCCESS,
-        Command::Render { .. } | Command::Errors { .. } => {
-            eprintln!("ganymede: not implemented");
-            ExitCode::FAILURE
+    let env = Env::read();
+    let args: Vec<_> = env::args_os().collect();
+    let hook = cli::is_hook(&args);
+    if hook {
+        cmd::hook::install_panic_hook(env.clone());
+    }
+    let (mut out, mut err) = (io::stdout(), io::stderr());
+    let cli = match Cli::try_parse_from(&args) {
+        Ok(cli) => cli,
+        Err(e)
+            if hook && !matches!(e.kind(), ErrorKind::DisplayHelp | ErrorKind::DisplayVersion) =>
+        {
+            let message = e.to_string();
+            let first = message.lines().next().unwrap_or("bad arguments");
+            cmd::hook::bad_args(first, &env, &mut io::stdin(), &mut out, &mut err);
+            return ExitCode::SUCCESS;
         }
+        Err(e) => e.exit(),
+    };
+    match cli.command {
+        Command::Hook(opts) => {
+            cmd::hook::run(&opts, &env, &mut io::stdin(), &mut out, &mut err);
+            ExitCode::SUCCESS
+        }
+        Command::Render {
+            transcript,
+            opts,
+            write,
+            force,
+        } => {
+            let args = cmd::render::Args {
+                transcript: &transcript,
+                opts: &opts,
+                write,
+                force,
+            };
+            cmd::render::run(&args, &env, &mut out, &mut err)
+        }
+        Command::Errors { count } => cmd::errors::run(count, &env, &mut out, &mut err),
     }
 }

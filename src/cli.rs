@@ -1,8 +1,11 @@
+use std::ffi::OsString;
 use std::path::PathBuf;
 
 use clap::{ArgAction, Args, Parser, Subcommand};
+use jiff::tz::TimeZone;
 
 use crate::harness::Harness;
+use crate::render;
 
 #[derive(Debug, Parser)]
 #[command(version, about)]
@@ -50,6 +53,26 @@ pub struct RenderOpts {
     pub max_lines: usize,
 }
 
+impl RenderOpts {
+    pub fn render_options(&self) -> render::Options {
+        render::Options {
+            thinking: self.thinking,
+            tool_output: self.tool_output,
+            max_lines: self.max_lines,
+            tz: TimeZone::system(),
+        }
+    }
+}
+
+/// Whether the subcommand is `hook`, judged before clap parses, since
+/// `hook` MUST exit 0 even when its arguments are bad.
+pub fn is_hook(args: &[OsString]) -> bool {
+    args.iter()
+        .skip(1)
+        .find(|a| !a.to_string_lossy().starts_with('-'))
+        .is_some_and(|a| a == "hook")
+}
+
 #[cfg(test)]
 mod tests {
     use clap::CommandFactory;
@@ -78,5 +101,14 @@ mod tests {
         assert!(!opts.thinking);
         assert!(!opts.tool_output);
         assert_eq!(opts.max_lines, 100);
+    }
+
+    #[test]
+    fn spots_hook_before_parsing() {
+        let args = |list: &[&str]| list.iter().map(OsString::from).collect::<Vec<_>>();
+        assert!(is_hook(&args(&["ganymede", "hook", "--bogus"])));
+        assert!(is_hook(&args(&["ganymede", "--bogus", "hook"])));
+        assert!(!is_hook(&args(&["ganymede", "render", "hook"])));
+        assert!(!is_hook(&args(&["ganymede"])));
     }
 }
