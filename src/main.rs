@@ -8,7 +8,7 @@ mod errlog;
 // Unused until the CLI loads transcripts.
 #[allow(dead_code)]
 mod harness;
-// Unused until the CLI saves sessions.
+// Unused until the CLI saves sessions or records failures.
 #[allow(dead_code)]
 mod lock;
 mod project;
