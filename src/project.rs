@@ -89,20 +89,21 @@ fn markers(level: &Path) -> Level {
     match fs::metadata(&jj) {
         Ok(meta) if meta.is_dir() => return main_checkout(level),
         Ok(_) => return jj_workspace(level, &jj),
-        Err(_) if dangling(&jj) => return Level::Broken,
+        Err(_) if present(&jj) => return Level::Broken,
         Err(_) => {}
     }
     let git = level.join(".git");
     match fs::metadata(&git) {
         Ok(meta) if meta.is_dir() => main_checkout(level),
         Ok(_) => git_file(level, &git),
-        Err(_) if dangling(&git) => Level::Broken,
+        Err(_) if present(&git) => Level::Broken,
         Err(_) => Level::NoMarker,
     }
 }
 
-/// A symlink whose target is gone is still a marker: it is a broken pointer.
-fn dangling(marker: &Path) -> bool {
+/// The marker entry exists, whether or not its target can be reached. One
+/// that cannot be followed is a broken pointer.
+fn present(marker: &Path) -> bool {
     fs::symlink_metadata(marker).is_ok()
 }
 
