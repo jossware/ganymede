@@ -2,7 +2,7 @@
 
 use std::fmt;
 use std::fs::{self, File, OpenOptions, Permissions};
-use std::io::{self, BufRead, BufReader, Read, Write};
+use std::io::{self, BufRead, BufReader, Write};
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::thread;
@@ -22,8 +22,6 @@ const TEMP_SUFFIX: &str = ".tmp";
 const NEW_NOTE_MODE: u32 = 0o644;
 pub const LOCK_TIMEOUT: Duration = Duration::from_secs(10);
 const LOCK_RETRY: Duration = Duration::from_millis(50);
-/// Caps a frontmatter read; real blocks are a few hundred bytes.
-const HEAD_BYTES: u64 = 1024 * 1024;
 
 #[derive(Debug)]
 pub enum Error {
@@ -203,7 +201,7 @@ fn find(harness_dir: &Path, id: &str, id8: &str) -> Result<Option<Found>, Error>
 /// A note's lines up to its frontmatter's closing line, so a long body is
 /// never read.
 fn head(path: &Path) -> io::Result<String> {
-    let mut reader = BufReader::new(File::open(path)?.take(HEAD_BYTES));
+    let mut reader = BufReader::new(File::open(path)?);
     let mut out = String::new();
     let mut line = Vec::new();
     for n in 0..=MAX_FRONTMATTER_LINES {
@@ -705,7 +703,7 @@ mod tests {
     fn find_reads_a_long_frontmatter_line() {
         let tmp = tempfile::tempdir().unwrap();
         let h = tmp.path();
-        let long = format!("unhandled: [\"{}\"]", "x".repeat(20_000));
+        let long = format!("unhandled: [\"{}\"]", "x".repeat(2 * 1024 * 1024));
         let text = format!("---\nsession: {ID}\n{long}\nproject: a\n---\nbody\n");
         let path = put(h, "a/2026-09-01-x-5f0c2a1e.md", &text);
         assert_eq!(
