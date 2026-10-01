@@ -121,7 +121,7 @@ fn io_at(path: &Path) -> impl FnOnce(io::Error) -> Failure + use<> {
 /// Appends `entry` to the log and says whether to alert. Never panics:
 /// the panic hook calls it.
 pub fn record(log: &Path, home: &Path, entry: &Entry) -> Alert {
-    record_within(log, home, entry, MAX_LEN, lock::TIMEOUT)
+    record_within(log, home, entry, MAX_LEN, lock::TIMEOUT, &mut io::stderr())
 }
 
 fn record_within(
@@ -130,6 +130,7 @@ fn record_within(
     entry: &Entry,
     max_len: usize,
     timeout: Duration,
+    stderr: &mut dyn Write,
 ) -> Alert {
     match check_seen_and_append(log, entry, max_len, timeout) {
         Ok(true) => Alert::No,
@@ -141,7 +142,6 @@ fn record_within(
         )),
         Err(failure) => {
             // `eprintln!` panics on a closed stderr.
-            let mut stderr = io::stderr();
             let _ = writeln!(
                 stderr,
                 "ganymede: couldn't write {}: {failure}",
@@ -264,7 +264,14 @@ mod tests {
         }
 
         fn record(&self, entry: &Entry) -> Alert {
-            record_within(&self.log(), Path::new(HOME), entry, MAX_LEN, Duration::ZERO)
+            record_within(
+                &self.log(),
+                Path::new(HOME),
+                entry,
+                MAX_LEN,
+                Duration::ZERO,
+                &mut io::sink(),
+            )
         }
 
         fn lines(&self) -> Vec<String> {
@@ -443,7 +450,16 @@ mod tests {
         let alerts: Vec<Alert> = std::thread::scope(|scope| {
             let runs: Vec<_> = (0..8)
                 .map(|_| {
-                    scope.spawn(|| record_within(&log, Path::new(HOME), &e, MAX_LEN, lock::TIMEOUT))
+                    scope.spawn(|| {
+                        record_within(
+                            &log,
+                            Path::new(HOME),
+                            &e,
+                            MAX_LEN,
+                            lock::TIMEOUT,
+                            &mut io::sink(),
+                        )
+                    })
                 })
                 .collect();
             runs.into_iter().map(|r| r.join().unwrap()).collect()
@@ -486,7 +502,7 @@ mod tests {
         let log = home.join(".local/state/ganymede/errors.jsonl");
         let e = Entry::new(Stage::Parse, "bad\n  line\tthree".into());
         assert_eq!(
-            record_within(&log, home, &e, MAX_LEN, Duration::ZERO),
+            record_within(&log, home, &e, MAX_LEN, Duration::ZERO, &mut io::sink()),
             Alert::Yes(
                 "ganymede: couldn't archive this session (parse: bad line three). \
                  Details: ~/.local/state/ganymede/errors.jsonl"
@@ -511,7 +527,14 @@ mod tests {
     // --- rotation ---
 
     fn record_small(env: &Env, e: &Entry, max_len: usize) -> Alert {
-        record_within(&env.log(), Path::new(HOME), e, max_len, Duration::ZERO)
+        record_within(
+            &env.log(),
+            Path::new(HOME),
+            e,
+            max_len,
+            Duration::ZERO,
+            &mut io::sink(),
+        )
     }
 
     #[test]
@@ -584,5 +607,33 @@ mod tests {
         let alert = env.record(&entry(Stage::Parse, Some("s"), None));
         assert!(is_fallback(&alert), "{alert:?}");
         assert!(!env.log().exists());
+    }
+
+    #[test]
+    fn fallback_writes_the_failure_and_the_entry_to_stderr() {
+        let env = Env::new();
+        let _held =
+            lock::acquire(&env.log().with_file_name("errors.lock"), Duration::ZERO).unwrap();
+        let e = entry(Stage::Parse, Some("s"), None);
+        let mut stderr = Vec::new();
+        let _ = record_within(
+            &env.log(),
+            Path::new(HOME),
+            &e,
+            MAX_LEN,
+            Duration::ZERO,
+            &mut stderr,
+        );
+        let text = String::from_utf8(stderr).unwrap();
+        let lines: Vec<&str> = text.lines().collect();
+        assert_eq!(lines.len(), 2, "{text}");
+        assert_eq!(
+            lines[0],
+            format!(
+                "ganymede: couldn't write {}: errors.lock is held by another run",
+                env.log().display()
+            )
+        );
+        assert_eq!(serde_json::from_str::<Entry>(lines[1]).unwrap(), e);
     }
 }
