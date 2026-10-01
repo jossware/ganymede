@@ -86,22 +86,24 @@ fn resolve(dir: &Path, home: &Path) -> Resolved {
 
 fn markers(level: &Path) -> Level {
     let jj = level.join(".jj").join("repo");
-    if let Ok(meta) = fs::metadata(&jj) {
-        return if meta.is_dir() {
-            main_checkout(level)
-        } else {
-            jj_workspace(level, &jj)
-        };
+    match fs::metadata(&jj) {
+        Ok(meta) if meta.is_dir() => return main_checkout(level),
+        Ok(_) => return jj_workspace(level, &jj),
+        Err(_) if dangling(&jj) => return Level::Broken,
+        Err(_) => {}
     }
     let git = level.join(".git");
-    if let Ok(meta) = fs::metadata(&git) {
-        return if meta.is_dir() {
-            main_checkout(level)
-        } else {
-            git_file(level, &git)
-        };
+    match fs::metadata(&git) {
+        Ok(meta) if meta.is_dir() => main_checkout(level),
+        Ok(_) => git_file(level, &git),
+        Err(_) if dangling(&git) => Level::Broken,
+        Err(_) => Level::NoMarker,
     }
-    Level::NoMarker
+}
+
+/// A symlink whose target is gone is still a marker: it is a broken pointer.
+fn dangling(marker: &Path) -> bool {
+    fs::symlink_metadata(marker).is_ok()
 }
 
 fn main_checkout(level: &Path) -> Level {
@@ -433,6 +435,26 @@ mod tests {
                 .recv_timeout(Duration::from_secs(5))
                 .unwrap_or_else(|_| panic!("{name}: blocked reading a FIFO"));
             assert_eq!(got, plain(name), "{name}");
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn dangling_marker_symlinks_are_broken() {
+        use std::os::unix::fs::symlink;
+
+        let root = tmp();
+        let outer = root.path().join("outer");
+        mkdir(&outer.join(".git"));
+        let git = outer.join("wt1");
+        mkdir(&git);
+        symlink(root.path().join("gone"), git.join(".git")).unwrap();
+        let jj = outer.join("ws1");
+        mkdir(&jj.join(".jj"));
+        symlink(root.path().join("gone"), jj.join(".jj/repo")).unwrap();
+
+        for (dir, name) in [(git, "wt1"), (jj, "ws1")] {
+            assert_eq!(at(&dir.join("src")), plain(name), "{name}");
         }
     }
 
