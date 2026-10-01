@@ -152,11 +152,15 @@ Notes live at:
 ```
 
 - `project` is the repository's name, read from `.git` or `.jj` without
-  running either tool. A git or jj worktree files under its main
-  repository; the worktree's name goes in the `worktree` field. Outside
-  any repository, `project` is the directory's basename. Codex Desktop
-  chats not tied to a folder file under `chat`.
+  running either tool. A session in a git or jj worktree is filed under
+  its main repository's name; the worktree's name goes in the
+  `worktree` field. Outside any repository, `project` is the
+  directory's basename. Codex Desktop chats not tied to a folder are
+  filed under `chat`.
 - The date is the session's start date. It never changes.
+- `title-slug` is the title reduced to ASCII `a-z0-9` and hyphens. When
+  that leaves nothing, as with a non-Latin or punctuation-only title,
+  the segment and its hyphen are dropped: `<YYYY-MM-DD>-<id8>.md`.
 - `id8` is the first 8 characters of the session id.
 
 One session is one note. Before writing, ganymede searches the harness
