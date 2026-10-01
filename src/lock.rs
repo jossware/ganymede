@@ -67,10 +67,12 @@ pub fn acquire(path: &Path, timeout: Duration) -> Result<Lock, Error> {
     loop {
         match fs4::FileExt::try_lock(&file) {
             Ok(()) => return Ok(Lock { _file: file }),
-            Err(fs4::TryLockError::WouldBlock) if Instant::now() < deadline => {
-                thread::sleep(RETRY);
+            Err(fs4::TryLockError::WouldBlock) => {
+                match deadline.checked_duration_since(Instant::now()) {
+                    Some(left) if !left.is_zero() => thread::sleep(RETRY.min(left)),
+                    _ => return Err(Error::Locked),
+                }
             }
-            Err(fs4::TryLockError::WouldBlock) => return Err(Error::Locked),
             Err(fs4::TryLockError::Error(e)) => return Err(io_at(path)(e)),
         }
     }
@@ -88,6 +90,18 @@ mod tests {
         assert!(matches!(acquire(&path, Duration::ZERO), Err(Error::Locked)));
         drop(first);
         let _lock = acquire(&path, Duration::ZERO).unwrap();
+    }
+
+    #[test]
+    fn timeout_shorter_than_a_retry_is_honoured() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("x.lock");
+        let _held = acquire(&path, Duration::ZERO).unwrap();
+        let timeout = Duration::from_millis(5);
+        let start = Instant::now();
+        assert!(matches!(acquire(&path, timeout), Err(Error::Locked)));
+        let waited = start.elapsed();
+        assert!(waited >= timeout && waited < RETRY, "{waited:?}");
     }
 
     #[test]
