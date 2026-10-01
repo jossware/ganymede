@@ -67,12 +67,19 @@ fn run_entry(entry: &Entry, opts: &Options) -> String {
 }
 
 /// Separators supply every blank line, so an entry carries none at its edges.
-/// An indented first line would continue a preceding tool's list item.
+/// An indented first line would continue a preceding tool's list item, so up
+/// to three spaces go. Four columns or more is an indented code block and stays.
 fn prose(text: &str) -> String {
-    escape::markdown(text)
-        .trim_start_matches([' ', '\t', '\n'])
-        .trim_end_matches('\n')
-        .to_string()
+    let text = escape::markdown(text);
+    let text = text.trim_end_matches('\n');
+    let blank = text.len() - text.trim_start_matches([' ', '\t', '\n']).len();
+    let line = &text[text[..blank].rfind('\n').map_or(0, |i| i + 1)..];
+    let spaces = line.len() - line.trim_start_matches(' ').len();
+    if spaces < 4 && !line[spaces..].starts_with('\t') {
+        line[spaces..].to_string()
+    } else {
+        line.to_string()
+    }
 }
 
 fn tool(name: &str, summary: &str, output: Option<&str>, failed: bool, opts: &Options) -> String {
@@ -431,6 +438,15 @@ mod tests {
             body(&s, &opts()),
             "> **Claude**\n\n- **Bash** `ls`\n\ndone\n  indented\n"
         );
+    }
+
+    #[test]
+    fn indented_code_prose_keeps_its_indent() {
+        for text in ["\n    fn main() {}", "\tfn main() {}", "  \tfn main() {}"] {
+            let s = session(vec![assistant(None, text)]);
+            let want = format!("> **Claude**\n\n{}\n", text.trim_start_matches('\n'));
+            assert_eq!(body(&s, &opts()), want, "{text:?}");
+        }
     }
 
     #[test]
