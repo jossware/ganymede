@@ -148,7 +148,15 @@ pub fn run(
             if ctx.harness.is_none() {
                 ctx.harness = detected(&transcript);
             }
-            fail(env, &ctx, stage_of(&e), e.to_string(), out, err);
+            // An I/O error alone does not say which file, and a Codex
+            // Desktop rollout can move away once its conversation is archived.
+            let error = match &e {
+                pipeline::Error::Load(LoadError::Io(_)) => {
+                    format!("{}: {e}", transcript.display())
+                }
+                _ => e.to_string(),
+            };
+            fail(env, &ctx, stage_of(&e), error, out, err);
         }
     }
 }
@@ -387,5 +395,25 @@ mod tests {
         let entries = errlog::recent(&log, 10).unwrap();
         assert_eq!(entries.len(), 2);
         assert_eq!(entries[0].session.as_deref(), Some("s1"));
+    }
+
+    #[test]
+    fn names_a_missing_transcript() {
+        let tmp = tempfile::tempdir().unwrap();
+        let env = Env {
+            home: Some(tmp.path().to_path_buf()),
+            state: Some(tmp.path().join("state")),
+        };
+        let missing = tmp.path().join("missing.jsonl");
+        let payload = format!(r#"{{"transcript_path":"{}"}}"#, missing.display());
+        let opts = hook_opts(&["--dir", &tmp.path().display().to_string()]);
+        let (mut out, mut err) = (Vec::new(), Vec::new());
+        run(&opts, &env, &mut payload.as_bytes(), &mut out, &mut err);
+        let log = paths::error_log(env.state.as_ref().unwrap());
+        let error = &errlog::recent(&log, 1).unwrap()[0].error;
+        assert!(
+            error.starts_with(&format!("{}: ", missing.display())),
+            "{error}"
+        );
     }
 }
