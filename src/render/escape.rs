@@ -291,19 +291,92 @@ fn trim_blank<'a>(lines: &'a [&'a str]) -> &'a [&'a str] {
 
 /// Code spans are matched within a line. A span crossing lines could run past
 /// a block CommonMark ends first, such as an HTML block, and copy it raw.
+/// Indented code is copied verbatim, since CommonMark shows it literally.
 fn prose(lines: &[&str]) -> String {
+    let code = indented_code(lines);
     let mut out = String::new();
     for (i, line) in lines.iter().enumerate() {
         if i > 0 {
             out.push('\n');
         }
-        if i > 0 && !is_blank(lines[i - 1]) && is_underline(line) {
+        if code[i] {
+            out.push_str(line);
+        } else if i > 0 && !is_blank(lines[i - 1]) && is_underline(line) {
             out.push_str(&underline(line));
         } else {
             inline(line, &mut out);
         }
     }
     out
+}
+
+/// Which lines CommonMark reads as indented code. Escaping keeps list markers,
+/// so the source's lists are the note's: four columns past a list item's
+/// content column is code, and anything less is the item's continuation.
+fn indented_code(lines: &[&str]) -> Vec<bool> {
+    let mut code = vec![false; lines.len()];
+    let mut margins: Vec<usize> = Vec::new();
+    let mut after_blank = true;
+    let mut in_code = false;
+    for (i, line) in lines.iter().enumerate() {
+        if is_blank(line) {
+            after_blank = true;
+            continue;
+        }
+        let width = indent_width(line);
+        let margin = margins.last().copied().unwrap_or(0);
+        if width >= margin + 4 {
+            // Indented code cannot interrupt a paragraph.
+            if after_blank || in_code {
+                code[i] = true;
+                in_code = true;
+                after_blank = false;
+            }
+            continue;
+        }
+        in_code = false;
+        if after_blank {
+            margins.retain(|&m| m <= width);
+        }
+        if let Some(content) = list_item(line, width) {
+            margins.retain(|&m| m <= width);
+            margins.push(content);
+        }
+        after_blank = false;
+    }
+    code
+}
+
+/// The content column of the list item `line` opens, if it opens one.
+fn list_item(line: &str, width: usize) -> Option<usize> {
+    let body = line.trim_start_matches([' ', '\t']);
+    let marker = if body.starts_with(['-', '*', '+']) {
+        1
+    } else {
+        let digits = body.bytes().take_while(u8::is_ascii_digit).count();
+        if !(1..=9).contains(&digits) || !body[digits..].starts_with(['.', ')']) {
+            return None;
+        }
+        digits + 1
+    };
+    let rest = &body[marker..];
+    let start = width + marker;
+    let mut col = start;
+    for c in rest.chars() {
+        match c {
+            ' ' => col += 1,
+            '\t' => col += 4 - col % 4,
+            _ => break,
+        }
+    }
+    let gap = col - start;
+    if is_blank(rest) || gap > 4 {
+        Some(start + 1)
+    } else if gap == 0 {
+        None
+    } else {
+        Some(col)
+    }
 }
 
 fn is_underline(line: &str) -> bool {
@@ -422,6 +495,33 @@ mod tests {
             ("    a\n    ```\n    b\n    ```", "```\na\n```\n```\nb\n```"),
             ("   not code\n    lazy", "   not code\n    lazy"),
             ("text\n\n    later", "text\n\n    later"),
+        ] {
+            assert_eq!(markdown(text), want, "text: {text:?}");
+        }
+    }
+
+    #[test]
+    fn indented_code_after_prose_stays_literal() {
+        for (text, want) in [
+            (
+                "a\n\n    if x < y\n\n    #z\nafter <z>",
+                "a\n\n    if x < y\n\n    #z\nafter &lt;z&gt;",
+            ),
+            ("a\n\n\tx < y", "a\n\n\tx < y"),
+            ("a\n    lazy <x>", "a\n    lazy &lt;x&gt;"),
+            ("- item\n\n    more <x>", "- item\n\n    more &lt;x&gt;"),
+            ("- item\n\n      x < y", "- item\n\n      x < y"),
+            ("10. item\n\n       x <y>", "10. item\n\n       x &lt;y&gt;"),
+            (
+                "1. a\n   - b\n\n        c <d>",
+                "1. a\n   - b\n\n        c &lt;d&gt;",
+            ),
+            (
+                "1. a\n   - b\n\n         x < y",
+                "1. a\n   - b\n\n         x < y",
+            ),
+            ("- item\n\nback\n\n    x < y", "- item\n\nback\n\n    x < y"),
+            ("```\nf\n```\n    x < y", "```\nf\n```\n    x < y"),
         ] {
             assert_eq!(markdown(text), want, "text: {text:?}");
         }
