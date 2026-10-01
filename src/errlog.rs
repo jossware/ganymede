@@ -68,6 +68,7 @@ impl Entry {
 }
 
 #[derive(Debug, PartialEq)]
+#[must_use = "an alert must be printed as a systemMessage"]
 pub enum Alert {
     Yes(String),
     No,
@@ -399,7 +400,7 @@ mod tests {
     #[test]
     fn another_stage_alerts_again() {
         let env = Env::new();
-        env.record(&entry(Stage::Parse, Some("s"), None));
+        let _ = env.record(&entry(Stage::Parse, Some("s"), None));
         assert!(is_yes(&env.record(&entry(Stage::Render, Some("s"), None))));
     }
 
@@ -438,7 +439,7 @@ mod tests {
     #[test]
     fn session_never_matches_a_transcript() {
         let env = Env::new();
-        env.record(&entry(Stage::Parse, None, Some("x")));
+        let _ = env.record(&entry(Stage::Parse, None, Some("x")));
         assert!(is_yes(&env.record(&entry(Stage::Parse, Some("x"), None))));
     }
 
@@ -488,7 +489,7 @@ mod tests {
     #[test]
     fn log_is_private_from_the_first_write() {
         let env = Env::new();
-        env.record(&entry(Stage::Parse, Some("s"), None));
+        let _ = env.record(&entry(Stage::Parse, Some("s"), None));
         let mode = fs::metadata(env.log()).unwrap().permissions().mode() & 0o777;
         assert_eq!(mode, 0o600, "{mode:o}");
     }
@@ -541,11 +542,11 @@ mod tests {
     fn rotation_keeps_the_newer_half_on_a_line_boundary() {
         let env = Env::new();
         for s in ["a", "b", "c", "d"] {
-            env.record(&entry(Stage::Parse, Some(s), None));
+            let _ = env.record(&entry(Stage::Parse, Some(s), None));
         }
         let before = env.lines();
         let len = fs::metadata(env.log()).unwrap().len() as usize;
-        record_small(&env, &entry(Stage::Parse, Some("e"), None), len - 1);
+        let _ = record_small(&env, &entry(Stage::Parse, Some("e"), None), len - 1);
         let after = env.lines();
         assert_eq!(
             after[..after.len() - 1],
@@ -559,7 +560,7 @@ mod tests {
     fn dedupe_sees_an_entry_rotation_drops() {
         let env = Env::new();
         for s in ["a", "b", "c", "d"] {
-            env.record(&entry(Stage::Parse, Some(s), None));
+            let _ = env.record(&entry(Stage::Parse, Some(s), None));
         }
         let len = fs::metadata(env.log()).unwrap().len() as usize;
         assert_eq!(
@@ -573,7 +574,7 @@ mod tests {
     fn one_huge_line_empties_the_log() {
         let env = Env::new();
         seed(&env, &"x".repeat(100));
-        record_small(&env, &entry(Stage::Parse, Some("s"), None), 50);
+        let _ = record_small(&env, &entry(Stage::Parse, Some("s"), None), 50);
         let lines = env.lines();
         assert_eq!(lines.len(), 1);
         assert!(lines[0].contains("\"s\""));
