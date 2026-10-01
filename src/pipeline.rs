@@ -56,8 +56,17 @@ pub struct Request<'a> {
 /// Saves the transcript's note. The transcript is read only once the
 /// lock is held: a run that read a shorter transcript must not write last.
 pub fn archive(req: &Request) -> Result<Outcome, Error> {
+    archive_with(req, harness::load)
+}
+
+/// `archive` with the transcript loader passed in, so a test can check
+/// the lock is held at the moment of loading.
+fn archive_with(
+    req: &Request,
+    load: impl FnOnce(&Path, Option<Harness>, bool) -> Result<Loaded, LoadError>,
+) -> Result<Outcome, Error> {
     let lock = archive::lock(req.lock).map_err(Error::Save)?;
-    let loaded = harness::load(req.transcript, req.harness, req.force).map_err(Error::Load)?;
+    let loaded = load(req.transcript, req.harness, req.force).map_err(Error::Load)?;
     match loaded {
         Loaded::Session(session) => {
             let path =
@@ -71,21 +80,17 @@ pub fn archive(req: &Request) -> Result<Outcome, Error> {
 
 #[cfg(test)]
 mod tests {
-    use std::fs::{self, OpenOptions};
-    use std::io::Write;
-    use std::sync::mpsc;
-    use std::thread;
     use std::time::Duration;
 
     use jiff::tz::TimeZone;
 
     use super::*;
+    use crate::lock;
 
     const FIXTURE: &str = concat!(
         env!("CARGO_MANIFEST_DIR"),
         "/tests/fixtures/claude/basic.jsonl"
     );
-    const LATE_TURN: &str = r#"{"parentUuid":null,"isSidechain":false,"type":"user","message":{"role":"user","content":"appended while the lock was held"},"uuid":"00000000-0000-4000-8000-0000000000ff","timestamp":"2026-09-04T03:00:00.000Z","userType":"external","entrypoint":"cli","cwd":"/Users/user/Workspaces/sample","sessionId":"5f0c2a1e-7b3d-4c9a-9e21-3d4b5a6c7d8e","version":"2.1.259"}"#;
 
     fn opts() -> render::Options {
         render::Options {
@@ -135,42 +140,30 @@ mod tests {
     #[test]
     fn loads_only_once_the_lock_is_held() {
         let tmp = tempfile::tempdir().unwrap();
-        let transcript = tmp.path().join("t.jsonl");
-        fs::copy(FIXTURE, &transcript).unwrap();
+        let opts = opts();
         let lock_path = tmp.path().join("archive.lock");
-        let held = archive::lock(&lock_path).unwrap();
-
-        let dir = tmp.path().to_path_buf();
-        let (started, start) = mpsc::channel();
-        let worker = {
-            let transcript = transcript.clone();
-            thread::spawn(move || {
-                let opts = opts();
-                let req = Request {
-                    lock: &lock_path,
-                    dir: &dir,
-                    transcript: &transcript,
-                    harness: None,
-                    force: false,
-                    opts: &opts,
-                    home: &dir,
-                };
-                started.send(()).unwrap();
-                archive(&req).map(|outcome| match outcome {
-                    Outcome::Saved { path, .. } => path,
-                    other => panic!("expected a saved note, got {other:?}"),
-                })
-            })
+        let req = Request {
+            lock: &lock_path,
+            dir: tmp.path(),
+            transcript: Path::new(FIXTURE),
+            harness: None,
+            force: false,
+            opts: &opts,
+            home: tmp.path(),
         };
-        start.recv().unwrap();
-        // Well past the lock's 50 ms retry, so the worker is waiting on it.
-        thread::sleep(Duration::from_millis(500));
-        assert!(!worker.is_finished(), "worker ran without the lock");
-        let mut file = OpenOptions::new().append(true).open(&transcript).unwrap();
-        writeln!(file, "{LATE_TURN}").unwrap();
-        drop(held);
-
-        let note = fs::read_to_string(worker.join().unwrap().unwrap()).unwrap();
-        assert!(note.contains("appended while the lock was held"));
+        let mut probed = false;
+        let outcome = archive_with(&req, |path, h, force| {
+            probed = true;
+            assert!(
+                matches!(
+                    lock::acquire(&lock_path, Duration::ZERO),
+                    Err(lock::Error::Locked)
+                ),
+                "loaded without the lock"
+            );
+            harness::load(path, h, force)
+        });
+        assert!(probed);
+        assert!(matches!(outcome, Ok(Outcome::Saved { .. })));
     }
 }
