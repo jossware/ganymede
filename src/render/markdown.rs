@@ -67,12 +67,22 @@ fn run_entry(entry: &Entry, opts: &Options) -> String {
 }
 
 /// Separators supply every blank line, so an entry carries none at its edges.
+/// An indented first line would continue a preceding tool's list item. Escaping
+/// has already fenced indented code, so what indent remains is safe to drop.
 fn prose(text: &str) -> String {
-    escape::markdown(text).trim_matches('\n').to_string()
+    escape::markdown(text)
+        .trim_start_matches([' ', '\t', '\n'])
+        .trim_end_matches('\n')
+        .to_string()
 }
 
 fn tool(name: &str, summary: &str, output: Option<&str>, failed: bool, opts: &Options) -> String {
-    let mut line = format!("- **{}**", escape::label(name));
+    // An empty name would render as `****`, a thematic break.
+    let mut line = if name.trim().is_empty() {
+        "- *(unnamed)*".to_string()
+    } else {
+        format!("- **{}**", escape::label(name))
+    };
     let span = escape::code_span(summary);
     if !span.is_empty() {
         line.push(' ');
@@ -115,16 +125,14 @@ fn callout(entry: &Entry, opts: &Options) -> String {
         ),
         _ => unreachable!("run entries are never callouts"),
     };
-    let mut blocks = escape::blocks(text);
+    let mut blocks = escape::blocks(text).into_iter().peekable();
     let mut head = format!("> [!{kind}]\n> {header}");
-    if matches!(blocks.first(), Some(Block::Prose(_)))
-        && let Block::Prose(prose) = blocks.remove(0)
-    {
+    if let Some(Block::Prose(prose)) = blocks.next_if(|b| matches!(b, Block::Prose(_))) {
         head.push_str("\n>\n");
         head.push_str(&quote(&prose));
     }
     let mut parts = vec![head];
-    parts.extend(blocks.into_iter().map(|block| match block {
+    parts.extend(blocks.map(|block| match block {
         Block::Prose(prose) => quote(&prose),
         Block::Fence(fence) => fence,
     }));
@@ -400,5 +408,48 @@ mod tests {
             body(&s, &opts()),
             "> **Claude**\n\n- **mcp\\_\\_srv\\_\\_x\\*y \\# h**\n"
         );
+    }
+
+    #[test]
+    fn empty_tool_name_gets_a_placeholder() {
+        let s = session(vec![
+            tool("", "ls", None, false),
+            tool(" \t", "", None, false),
+        ]);
+        assert_eq!(
+            body(&s, &opts()),
+            "> **Claude**\n\n- *(unnamed)* `ls`\n\n- *(unnamed)*\n"
+        );
+    }
+
+    #[test]
+    fn indented_prose_after_a_tool_leaves_the_list() {
+        let s = session(vec![
+            tool("Bash", "ls", None, false),
+            assistant(None, "\n  \n  done\n  indented"),
+        ]);
+        assert_eq!(
+            body(&s, &opts()),
+            "> **Claude**\n\n- **Bash** `ls`\n\ndone\n  indented\n"
+        );
+    }
+
+    #[test]
+    fn indented_code_after_a_tool_leaves_the_list() {
+        let s = session(vec![
+            tool("Bash", "ls", None, false),
+            assistant(None, "    if x < y"),
+        ]);
+        assert_eq!(
+            body(&s, &opts()),
+            "> **Claude**\n\n- **Bash** `ls`\n\n```\nif x < y\n```\n"
+        );
+    }
+
+    #[test]
+    fn codex_run_header() {
+        let mut s = session(vec![assistant(ts("2026-09-04T02:25:00Z"), "a")]);
+        s.harness = Harness::Codex;
+        assert_eq!(body(&s, &opts()), "> **Codex** `09/03 22:25:00`\n\na\n");
     }
 }

@@ -136,7 +136,9 @@ struct Opener {
 fn segments(text: &str) -> Vec<Segment<'_>> {
     let mut out = Vec::new();
     let mut prose = Vec::new();
-    let mut lines = text.split('\n');
+    let all: Vec<&str> = text.split('\n').collect();
+    let start = leading_code(&all, &mut out);
+    let mut lines = all[start..].iter().copied();
     while let Some(line) = lines.next() {
         let Some(open) = opener(line) else {
             prose.push(line);
@@ -164,6 +166,54 @@ fn segments(text: &str) -> Vec<Segment<'_>> {
         out.push(Segment::Prose(prose));
     }
     out
+}
+
+/// With nothing before it, a run indented four columns is an indented code
+/// block, never a list continuation. As a fence its content stays literal and
+/// it ends a list the note has open. A fence opener wins at any indent, as it
+/// does everywhere else here.
+fn leading_code<'a>(lines: &[&'a str], out: &mut Vec<Segment<'a>>) -> usize {
+    let Some(start) = lines.iter().position(|l| !is_blank(l)) else {
+        return 0;
+    };
+    let code = |l: &str| indent_width(l) >= 4 && opener(l).is_none();
+    if !code(lines[start]) {
+        return 0;
+    }
+    let run = lines[start..]
+        .iter()
+        .position(|l| !is_blank(l) && !code(l))
+        .map_or(lines.len(), |i| start + i);
+    let end = lines[..run]
+        .iter()
+        .rposition(|l| !is_blank(l))
+        .map_or(start, |i| i + 1);
+    if start > 0 {
+        out.push(Segment::Prose(lines[..start].to_vec()));
+    }
+    let content = lines[start..end]
+        .iter()
+        .map(|l| strip_columns(l, 4))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let fence = fence_for(&content);
+    out.push(Segment::Fence(format!("{fence}\n{content}\n{fence}")));
+    end
+}
+
+fn strip_columns(line: &str, cols: usize) -> &str {
+    let mut width = 0;
+    for (i, c) in line.char_indices() {
+        if width >= cols {
+            return &line[i..];
+        }
+        match c {
+            ' ' => width += 1,
+            '\t' => width += 4 - width % 4,
+            _ => return &line[i..],
+        }
+    }
+    ""
 }
 
 fn opener(line: &str) -> Option<Opener> {
@@ -241,19 +291,112 @@ fn trim_blank<'a>(lines: &'a [&'a str]) -> &'a [&'a str] {
 
 /// Code spans are matched within a line. A span crossing lines could run past
 /// a block CommonMark ends first, such as an HTML block, and copy it raw.
+/// Indented code is copied verbatim, since CommonMark shows it literally.
 fn prose(lines: &[&str]) -> String {
+    let code = indented_code(lines);
     let mut out = String::new();
     for (i, line) in lines.iter().enumerate() {
         if i > 0 {
             out.push('\n');
         }
-        if i > 0 && !is_blank(lines[i - 1]) && is_underline(line) {
+        if code[i] {
+            out.push_str(line);
+        } else if i > 0 && !is_blank(lines[i - 1]) && is_underline(line) {
             out.push_str(&underline(line));
         } else {
             inline(line, &mut out);
         }
     }
     out
+}
+
+/// Which lines CommonMark reads as indented code. Escaping keeps list markers,
+/// so the source's lists are the note's: four columns past a list item's
+/// content column is code, and anything less is the item's continuation.
+fn indented_code(lines: &[&str]) -> Vec<bool> {
+    let mut code = vec![false; lines.len()];
+    let mut items: Vec<Item> = Vec::new();
+    let mut paragraph = false;
+    for (i, line) in lines.iter().enumerate() {
+        if is_blank(line) {
+            paragraph = false;
+            continue;
+        }
+        let width = indent_width(line);
+        let margin = items.last().map_or(0, |item| item.content);
+        if width >= margin + 4 {
+            // Indented code cannot interrupt a paragraph.
+            code[i] = !paragraph;
+            continue;
+        }
+        let open = list_item(line, width).filter(|item| {
+            // Only a non-empty bullet or a list from 1 may interrupt a paragraph,
+            // unless the item joins a list already open.
+            let sibling = items.iter().find(|open| open.content > width);
+            !paragraph
+                || sibling.is_some_and(|open| open.kind == item.kind)
+                || (!item.empty && item.number.is_none_or(|n| n == 1))
+        });
+        if open.is_some() || !paragraph {
+            items.retain(|item| item.content <= width);
+        }
+        let mut next = open;
+        while let Some(item) = next {
+            next = item.rest.and_then(|rest| list_item(rest, item.content));
+            items.push(item);
+        }
+        paragraph = true;
+    }
+    code
+}
+
+struct Item<'a> {
+    /// The bullet character, or the ordered delimiter.
+    kind: char,
+    number: Option<u32>,
+    content: usize,
+    empty: bool,
+    /// Content that may open a nested item on the same line.
+    rest: Option<&'a str>,
+}
+
+/// The list item `line` opens, if it opens one.
+fn list_item(line: &str, width: usize) -> Option<Item<'_>> {
+    let body = line.trim_start_matches([' ', '\t']);
+    let (kind, number, marker) = if body.starts_with(['-', '*', '+']) {
+        (body.chars().next()?, None, 1)
+    } else {
+        let digits = body.bytes().take_while(u8::is_ascii_digit).count();
+        let kind = body[digits..].chars().next()?;
+        if !(1..=9).contains(&digits) || !matches!(kind, '.' | ')') {
+            return None;
+        }
+        (kind, body[..digits].parse().ok(), digits + 1)
+    };
+    let rest = &body[marker..];
+    let start = width + marker;
+    let mut col = start;
+    for c in rest.chars() {
+        match c {
+            ' ' => col += 1,
+            '\t' => col += 4 - col % 4,
+            _ => break,
+        }
+    }
+    let gap = col - start;
+    let empty = is_blank(rest);
+    if gap == 0 && !empty {
+        return None;
+    }
+    // Five columns or more after the marker is code, which starts one in.
+    let nested = !empty && gap <= 4;
+    Some(Item {
+        kind,
+        number,
+        content: if nested { col } else { start + 1 },
+        empty,
+        rest: nested.then(|| rest.trim_start_matches([' ', '\t'])),
+    })
 }
 
 fn is_underline(line: &str) -> bool {
@@ -357,6 +500,69 @@ mod tests {
             ("before\n````\nnested\n````\nafter", "`````"),
         ] {
             assert_eq!(fence_for(content), want, "content: {content:?}");
+        }
+    }
+
+    #[test]
+    fn leading_indented_code_becomes_a_fence() {
+        for (text, want) in [
+            ("    if x < y", "```\nif x < y\n```"),
+            (
+                "\n\tif #x\n\n      %%y\n\nafter <z>",
+                "\n```\nif #x\n\n  %%y\n```\n\nafter &lt;z&gt;",
+            ),
+            ("    a ``` b", "````\na ``` b\n````"),
+            ("    a\n    ```\n    b\n    ```", "```\na\n```\n```\nb\n```"),
+            ("   not code\n    lazy", "   not code\n    lazy"),
+            ("text\n\n    later", "text\n\n    later"),
+        ] {
+            assert_eq!(markdown(text), want, "text: {text:?}");
+        }
+    }
+
+    #[test]
+    fn indented_code_after_prose_stays_literal() {
+        for (text, want) in [
+            (
+                "a\n\n    if x < y\n\n    #z\nafter <z>",
+                "a\n\n    if x < y\n\n    #z\nafter &lt;z&gt;",
+            ),
+            ("a\n\n\tx < y", "a\n\n\tx < y"),
+            ("a\n    lazy <x>", "a\n    lazy &lt;x&gt;"),
+            ("- item\n\n    more <x>", "- item\n\n    more &lt;x&gt;"),
+            ("- item\n\n      x < y", "- item\n\n      x < y"),
+            ("10. item\n\n       x <y>", "10. item\n\n       x &lt;y&gt;"),
+            (
+                "1. a\n   - b\n\n        c <d>",
+                "1. a\n   - b\n\n        c &lt;d&gt;",
+            ),
+            (
+                "1. a\n   - b\n\n         x < y",
+                "1. a\n   - b\n\n         x < y",
+            ),
+            ("- item\n\nback\n\n    x < y", "- item\n\nback\n\n    x < y"),
+            ("```\nf\n```\n    x < y", "```\nf\n```\n    x < y"),
+            ("- - item\n\n      <x>", "- - item\n\n      &lt;x&gt;"),
+            ("1. - item\n\n         x < y", "1. - item\n\n         x < y"),
+            ("a\n2. b\n\n    x < y", "a\n2. b\n\n    x < y"),
+            ("a\n1. b\n\n    <x>", "a\n1. b\n\n    &lt;x&gt;"),
+            ("1. a\n2. b\n\n    <x>", "1. a\n2. b\n\n    &lt;x&gt;"),
+            (
+                "10. a\n2) b\n\n       <x>",
+                "10. a\n2) b\n\n       &lt;x&gt;",
+            ),
+            (
+                "- a\n    lazy\nback\n\n    <x>",
+                "- a\n    lazy\nback\n\n    &lt;x&gt;",
+            ),
+            ("a\n-     b\n\n    <x>", "a\n-     b\n\n    &lt;x&gt;"),
+            (
+                "- a\n\n      <c>\nback\n\n    x < y",
+                "- a\n\n      <c>\nback\n\n    x < y",
+            ),
+            ("a\n-\n\n    x < y", "a\n\\-\n\n    x < y"),
+        ] {
+            assert_eq!(markdown(text), want, "text: {text:?}");
         }
     }
 
