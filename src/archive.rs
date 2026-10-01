@@ -1,10 +1,11 @@
 //! Where a session's note lives, and writing it there.
 
 use std::fmt;
-use std::fs::{self, File};
+use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read};
 use std::path::{Path, PathBuf};
-use std::time::SystemTime;
+use std::thread;
+use std::time::{Duration, Instant, SystemTime};
 
 use jiff::Timestamp;
 use jiff::tz::TimeZone;
@@ -13,6 +14,8 @@ use crate::session::Session;
 use crate::title;
 
 const MAX_FRONTMATTER_LINES: usize = 64;
+pub const LOCK_TIMEOUT: Duration = Duration::from_secs(10);
+const LOCK_RETRY: Duration = Duration::from_millis(50);
 /// Enough for any frontmatter block, without reading a whole note.
 const HEAD_BYTES: u64 = 16 * 1024;
 
@@ -237,10 +240,46 @@ fn single_quoted(body: &str) -> Option<String> {
     None
 }
 
+/// The archive lock, held until dropped. Take it before loading the
+/// transcript: a session loaded outside the lock can still be saved after
+/// a newer one, and its stale render would win.
+#[derive(Debug)]
+pub struct Lock {
+    _file: File,
+}
+
+/// Waits up to `LOCK_TIMEOUT` for the lock at `path`.
+pub fn lock(path: &Path) -> Result<Lock, Error> {
+    lock_within(path, LOCK_TIMEOUT)
+}
+
+fn lock_within(path: &Path, timeout: Duration) -> Result<Lock, Error> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).map_err(io_at(parent))?;
+    }
+    let file = OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(false)
+        .open(path)
+        .map_err(io_at(path))?;
+    let deadline = Instant::now() + timeout;
+    loop {
+        // Called by path: std's inherent File::try_lock would shadow it.
+        match fs4::FileExt::try_lock(&file) {
+            Ok(()) => return Ok(Lock { _file: file }),
+            Err(fs4::TryLockError::WouldBlock) if Instant::now() < deadline => {
+                thread::sleep(LOCK_RETRY);
+            }
+            Err(fs4::TryLockError::WouldBlock) => return Err(Error::Locked),
+            Err(fs4::TryLockError::Error(e)) => return Err(io_at(path)(e)),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::fs::FileTimes;
-    use std::time::Duration;
 
     use jiff::tz::Offset;
 
@@ -538,5 +577,63 @@ mod tests {
         assert_eq!(find(h, ID, "5f0c2a1e").unwrap().unwrap().path, path);
         // One replacement character stands in for the cut byte.
         assert!(head(&path).unwrap().len() <= HEAD_BYTES as usize + 2);
+    }
+
+    // --- lock ---
+
+    fn hold(path: &Path) -> File {
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        File::create(path).unwrap();
+        let file = File::open(path).unwrap();
+        fs4::FileExt::try_lock(&file).unwrap();
+        file
+    }
+
+    #[test]
+    fn lock_creates_its_folder() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("state/ganymede/archive.lock");
+        lock_within(&path, Duration::ZERO).unwrap();
+        assert!(path.is_file());
+    }
+
+    #[test]
+    fn lock_times_out_while_held() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("archive.lock");
+        let held = hold(&path);
+        let start = Instant::now();
+        assert!(matches!(
+            lock_within(&path, Duration::from_millis(120)),
+            Err(Error::Locked)
+        ));
+        assert!(start.elapsed() >= Duration::from_millis(120));
+        drop(held);
+        lock_within(&path, Duration::ZERO).unwrap();
+    }
+
+    #[test]
+    fn lock_is_held_until_dropped() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("archive.lock");
+        let first = lock(&path).unwrap();
+        assert!(matches!(
+            lock_within(&path, Duration::ZERO),
+            Err(Error::Locked)
+        ));
+        drop(first);
+        lock_within(&path, Duration::ZERO).unwrap();
+    }
+
+    #[test]
+    fn lock_reports_an_unusable_path() {
+        let tmp = tempfile::tempdir().unwrap();
+        let blocker = put(tmp.path(), "state", "a file, not a folder");
+        let path = blocker.join("archive.lock");
+        let err = lock_within(&path, Duration::ZERO).unwrap_err();
+        assert!(
+            matches!(&err, Error::Io { path: p, .. } if *p == blocker),
+            "{err}"
+        );
     }
 }
