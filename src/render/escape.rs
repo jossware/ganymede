@@ -136,7 +136,9 @@ struct Opener {
 fn segments(text: &str) -> Vec<Segment<'_>> {
     let mut out = Vec::new();
     let mut prose = Vec::new();
-    let mut lines = text.split('\n');
+    let all: Vec<&str> = text.split('\n').collect();
+    let start = leading_code(&all, &mut out);
+    let mut lines = all[start..].iter().copied();
     while let Some(line) = lines.next() {
         let Some(open) = opener(line) else {
             prose.push(line);
@@ -164,6 +166,54 @@ fn segments(text: &str) -> Vec<Segment<'_>> {
         out.push(Segment::Prose(prose));
     }
     out
+}
+
+/// With nothing before it, a run indented four columns is an indented code
+/// block, never a list continuation. As a fence its content stays literal and
+/// it ends a list the note has open. A fence opener wins at any indent, as it
+/// does everywhere else here.
+fn leading_code<'a>(lines: &[&'a str], out: &mut Vec<Segment<'a>>) -> usize {
+    let Some(start) = lines.iter().position(|l| !is_blank(l)) else {
+        return 0;
+    };
+    let code = |l: &str| indent_width(l) >= 4 && opener(l).is_none();
+    if !code(lines[start]) {
+        return 0;
+    }
+    let run = lines[start..]
+        .iter()
+        .position(|l| !is_blank(l) && !code(l))
+        .map_or(lines.len(), |i| start + i);
+    let end = lines[..run]
+        .iter()
+        .rposition(|l| !is_blank(l))
+        .map_or(start, |i| i + 1);
+    if start > 0 {
+        out.push(Segment::Prose(lines[..start].to_vec()));
+    }
+    let content = lines[start..end]
+        .iter()
+        .map(|l| strip_columns(l, 4))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let fence = fence_for(&content);
+    out.push(Segment::Fence(format!("{fence}\n{content}\n{fence}")));
+    end
+}
+
+fn strip_columns(line: &str, cols: usize) -> &str {
+    let mut width = 0;
+    for (i, c) in line.char_indices() {
+        if width >= cols {
+            return &line[i..];
+        }
+        match c {
+            ' ' => width += 1,
+            '\t' => width += 4 - width % 4,
+            _ => return &line[i..],
+        }
+    }
+    ""
 }
 
 fn opener(line: &str) -> Option<Opener> {
@@ -357,6 +407,23 @@ mod tests {
             ("before\n````\nnested\n````\nafter", "`````"),
         ] {
             assert_eq!(fence_for(content), want, "content: {content:?}");
+        }
+    }
+
+    #[test]
+    fn leading_indented_code_becomes_a_fence() {
+        for (text, want) in [
+            ("    if x < y", "```\nif x < y\n```"),
+            (
+                "\n\tif #x\n\n      %%y\n\nafter <z>",
+                "\n```\nif #x\n\n  %%y\n```\n\nafter &lt;z&gt;",
+            ),
+            ("    a ``` b", "````\na ``` b\n````"),
+            ("    a\n    ```\n    b\n    ```", "```\na\n```\n```\nb\n```"),
+            ("   not code\n    lazy", "   not code\n    lazy"),
+            ("text\n\n    later", "text\n\n    later"),
+        ] {
+            assert_eq!(markdown(text), want, "text: {text:?}");
         }
     }
 
