@@ -2,7 +2,7 @@
 
 use std::fmt;
 use std::fs::{self, File, OpenOptions, Permissions};
-use std::io::{self, Read, Write};
+use std::io::{self, BufRead, BufReader, Read, Write};
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::thread;
@@ -22,8 +22,8 @@ const TEMP_SUFFIX: &str = ".tmp";
 const NEW_NOTE_MODE: u32 = 0o644;
 pub const LOCK_TIMEOUT: Duration = Duration::from_secs(10);
 const LOCK_RETRY: Duration = Duration::from_millis(50);
-/// Enough for any frontmatter block, without reading a whole note.
-const HEAD_BYTES: u64 = 16 * 1024;
+/// Caps a frontmatter read; real blocks are a few hundred bytes.
+const HEAD_BYTES: u64 = 1024 * 1024;
 
 #[derive(Debug)]
 pub enum Error {
@@ -165,15 +165,25 @@ fn find(harness_dir: &Path, id: &str, id8: &str) -> Result<Option<Found>, Error>
                 .file_name()
                 .to_str()
                 .is_some_and(|n| n.ends_with(&suffix));
-            if !named || !note.file_type().is_ok_and(|t| t.is_file()) {
+            if !named {
                 continue;
             }
             let path = note.path();
-            let Ok(mtime) = note.metadata().and_then(|m| m.modified()) else {
-                continue;
-            };
-            let Ok(head) = head(&path) else {
-                continue;
+            // A candidate that cannot be read may be this session's note;
+            // writing a new one would duplicate it. NotFound is a file
+            // deleted since the listing.
+            let read = note.file_type().and_then(|t| {
+                if !t.is_file() {
+                    return Ok(None);
+                }
+                let mtime = note.metadata()?.modified()?;
+                Ok(Some((mtime, head(&path)?)))
+            });
+            let (mtime, head) = match read {
+                Ok(Some(read)) => read,
+                Ok(None) => continue,
+                Err(e) if e.kind() == io::ErrorKind::NotFound => continue,
+                Err(e) => return Err(io_at(&path)(e)),
             };
             let fields = fields(&head);
             if fields.session.as_deref() != Some(id) {
@@ -190,10 +200,25 @@ fn find(harness_dir: &Path, id: &str, id8: &str) -> Result<Option<Found>, Error>
     Ok(best.map(|(_, path, project)| Found { path, project }))
 }
 
+/// A note's lines up to its frontmatter's closing line, so a long body is
+/// never read.
 fn head(path: &Path) -> io::Result<String> {
-    let mut buf = Vec::new();
-    File::open(path)?.take(HEAD_BYTES).read_to_end(&mut buf)?;
-    Ok(String::from_utf8_lossy(&buf).into_owned())
+    let mut reader = BufReader::new(File::open(path)?.take(HEAD_BYTES));
+    let mut out = String::new();
+    let mut line = Vec::new();
+    for n in 0..=MAX_FRONTMATTER_LINES {
+        line.clear();
+        if reader.read_until(b'\n', &mut line)? == 0 {
+            break;
+        }
+        let text = String::from_utf8_lossy(&line);
+        out.push_str(&text);
+        let bare = text.trim_end_matches(['\n', '\r']);
+        if (n == 0 && bare != "---") || (n > 0 && bare == "---") {
+            break;
+        }
+    }
+    Ok(out)
 }
 
 /// `session:` and `project:` from a leading `---` block. Only ganymede
@@ -663,16 +688,46 @@ mod tests {
     fn find_reads_only_the_head_of_a_large_note() {
         let tmp = tempfile::tempdir().unwrap();
         let h = tmp.path();
-        // An odd-length prefix puts the 16 KiB cut inside a two-byte character.
-        let body = format!("x{}", "é".repeat(600_000));
+        let body = "é".repeat(600_000);
         let path = put(
             h,
             "a/2026-09-01-x-5f0c2a1e.md",
             &format!("{}{body}", note(ID, "a")),
         );
         assert_eq!(find(h, ID, "5f0c2a1e").unwrap().unwrap().path, path);
-        // One replacement character stands in for the cut byte.
-        assert!(head(&path).unwrap().len() <= HEAD_BYTES as usize + 2);
+        assert_eq!(
+            head(&path).unwrap(),
+            format!("---\ntype: session\nproject: a\nsession: {ID}\n---\n")
+        );
+    }
+
+    #[test]
+    fn find_reads_a_long_frontmatter_line() {
+        let tmp = tempfile::tempdir().unwrap();
+        let h = tmp.path();
+        let long = format!("unhandled: [\"{}\"]", "x".repeat(20_000));
+        let text = format!("---\nsession: {ID}\n{long}\nproject: a\n---\nbody\n");
+        let path = put(h, "a/2026-09-01-x-5f0c2a1e.md", &text);
+        assert_eq!(
+            find(h, ID, "5f0c2a1e").unwrap(),
+            Some(Found {
+                path,
+                project: Some("a".into()),
+            })
+        );
+    }
+
+    #[test]
+    fn find_reports_an_unreadable_candidate() {
+        let tmp = tempfile::tempdir().unwrap();
+        let h = tmp.path();
+        let path = put(h, "a/2026-09-01-x-5f0c2a1e.md", &note(ID, "a"));
+        fs::set_permissions(&path, Permissions::from_mode(0o000)).unwrap();
+        let err = find(h, ID, "5f0c2a1e").unwrap_err();
+        assert!(
+            matches!(&err, Error::Io { path: p, .. } if *p == path),
+            "{err}"
+        );
     }
 
     // --- lock ---
