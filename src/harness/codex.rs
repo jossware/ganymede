@@ -308,7 +308,8 @@ fn reasoning(item: &Value) -> Option<String> {
     (!text.is_empty()).then_some(text)
 }
 
-/// Joins text parts given either as strings or as `{"text": ...}` objects.
+/// Reasoning parts have been seen both as bare strings and as
+/// `{"text": ...}` objects.
 fn texts(parts: &[Value]) -> String {
     parts
         .iter()
@@ -318,11 +319,15 @@ fn texts(parts: &[Value]) -> String {
         .join("\n\n")
 }
 
-/// Opening a page leaves `query` empty.
+/// Opening a page leaves `query` empty, and sometimes `action.url` too.
 fn web_search(item: &Value, ts: Option<Timestamp>) -> Entry {
+    let first_result = array_at(item, "results")
+        .first()
+        .and_then(|r| str_at(r, "url"));
     let summary = ["query", "action.query", "action.url"]
         .iter()
         .filter_map(|p| str_at(item, p))
+        .chain(first_result)
         .find(|s| !s.is_empty())
         .unwrap_or_default();
     tool(
@@ -365,7 +370,7 @@ fn file_path(uri: &str) -> String {
             }
         }
     }
-    String::from_utf8_lossy(&bytes).into_owned()
+    String::from_utf8(bytes).unwrap_or_else(|_| path.to_string())
 }
 
 fn hex(b: u8) -> Option<u8> {
@@ -742,6 +747,15 @@ mod tests {
     }
 
     #[test]
+    fn forced_codex_on_non_rollout_is_a_parse_error() {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/claude/basic.jsonl");
+        assert!(matches!(
+            load(&path, Some(Harness::Codex), false),
+            Err(LoadError::Parse(e)) if e == "missing session_meta"
+        ));
+    }
+
+    #[test]
     fn malformed_mid_file_line_is_tallied() {
         let Ok(Loaded::Session(s)) = load_fixture("malformed.jsonl", false) else {
             panic!("expected a session");
@@ -1095,6 +1109,15 @@ mod tests {
     }
 
     #[test]
+    fn web_search_falls_back_to_first_result() {
+        let s = map_one(json!({
+            "type": "WebSearch", "query": "", "action": {"type": "other"},
+            "results": [{"url": "https://a.example"}, {"url": "https://b.example"}],
+        }));
+        assert_eq!(tools(&s), [("WebSearch", "https://a.example", None, false)]);
+    }
+
+    #[test]
     fn plan_summary_drops_heading_marks() {
         let s = map_one(json!({"type": "Plan", "text": "\n# Worktree plan\n\nBody"}));
         assert_eq!(
@@ -1116,6 +1139,11 @@ mod tests {
         assert_eq!(file_path("/x/%zz"), "/x/%zz");
         assert_eq!(file_path("/x/%4"), "/x/%4");
         assert_eq!(file_path("/plain"), "/plain");
+    }
+
+    #[test]
+    fn non_utf8_file_uris_stay_encoded() {
+        assert_eq!(file_path("file:///a/%FF.png"), "/a/%FF.png");
     }
 
     #[test]
