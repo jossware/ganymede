@@ -32,21 +32,30 @@ pub fn run(count: usize, env: &Env, out: &mut dyn Write, err: &mut dyn Write) ->
 
 /// `<date> <time> <stage> <harness> <event> <session8> <error>`.
 fn line(entry: &Entry, tz: &TimeZone) -> String {
-    let field = |f: &Option<String>| f.clone().unwrap_or_else(|| "-".to_string());
     let session = entry
         .session
-        .as_deref()
-        .map(|s| s.chars().take(8).collect())
-        .unwrap_or_else(|| "-".to_string());
+        .as_ref()
+        .map(|s| s.chars().take(8).collect::<String>());
     format!(
         "{} {} {} {} {} {}",
         entry.ts.to_zoned(tz.clone()).strftime("%Y-%m-%d %H:%M"),
         entry.stage.as_str(),
-        field(&entry.harness),
-        field(&entry.event),
-        session,
+        field(entry.harness.as_deref()),
+        field(entry.event.as_deref()),
+        field(session.as_deref()),
         errlog::one_line(&entry.error),
     )
+}
+
+/// One whitespace-free column. Payload fields are not trusted to be
+/// single words, and a space would shift every column after it.
+fn field(value: Option<&str>) -> String {
+    let words: Vec<&str> = value.unwrap_or("").split_whitespace().collect();
+    if words.is_empty() {
+        "-".to_string()
+    } else {
+        words.join("_")
+    }
 }
 
 #[cfg(test)]
@@ -69,6 +78,18 @@ mod tests {
         assert_eq!(
             line(&entry, &TimeZone::fixed(jiff::tz::offset(-4))),
             "2026-10-01 11:40 parse codex Stop 019a3f2c missing session_meta"
+        );
+    }
+
+    #[test]
+    fn keeps_payload_fields_on_one_line() {
+        let mut entry = entry();
+        entry.harness = Some(" ".into());
+        entry.event = Some("Stop\nspoof".into());
+        entry.session = Some("ab\ncd".into());
+        assert_eq!(
+            line(&entry, &TimeZone::UTC),
+            "2026-10-01 15:40 parse - Stop_spoof ab_cd missing session_meta"
         );
     }
 
