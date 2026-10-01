@@ -625,6 +625,18 @@ mod tests {
     }
 
     #[test]
+    fn unreadable_log_under_the_lock_alerts_every_time() {
+        let env = Env::new();
+        fs::create_dir_all(env.log()).unwrap();
+        let e = entry(Stage::Parse, Some("s"), None);
+        let first = env.record(&e);
+        let second = env.record(&e);
+        assert!(is_fallback(&first), "{first:?}");
+        assert!(is_fallback(&second), "{second:?}");
+        assert!(env.log().with_file_name("errors.lock").exists());
+    }
+
+    #[test]
     fn held_lock_falls_back() {
         let env = Env::new();
         let _held =
