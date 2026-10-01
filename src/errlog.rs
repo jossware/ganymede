@@ -1,0 +1,583 @@
+//! The error log, and whether a failure earns an alert.
+
+use std::fmt;
+use std::fs::{self, OpenOptions};
+use std::io::{self, Write};
+use std::os::unix::fs::OpenOptionsExt;
+use std::path::{Path, PathBuf};
+use std::time::Duration;
+
+use jiff::Timestamp;
+use serde::{Deserialize, Serialize};
+
+use crate::lock;
+
+const MAX_LEN: usize = 1024 * 1024;
+/// Entries carry session ids and transcript paths.
+const LOG_MODE: u32 = 0o600;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Stage {
+    Payload,
+    Detect,
+    Parse,
+    Render,
+    Write,
+    Panic,
+}
+
+impl Stage {
+    fn as_str(self) -> &'static str {
+        match self {
+            Stage::Payload => "payload",
+            Stage::Detect => "detect",
+            Stage::Parse => "parse",
+            Stage::Render => "render",
+            Stage::Write => "write",
+            Stage::Panic => "panic",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Entry {
+    pub ts: Timestamp,
+    pub version: String,
+    pub harness: Option<String>,
+    pub event: Option<String>,
+    pub session: Option<String>,
+    pub transcript: Option<String>,
+    pub stage: Stage,
+    pub error: String,
+}
+
+impl Entry {
+    pub fn new(stage: Stage, error: String) -> Entry {
+        Entry {
+            ts: Timestamp::now(),
+            version: env!("CARGO_PKG_VERSION").to_string(),
+            harness: None,
+            event: None,
+            session: None,
+            transcript: None,
+            stage,
+            error,
+        }
+    }
+}
+
+#[derive(Debug, PartialEq)]
+pub enum Alert {
+    Yes(String),
+    No,
+}
+
+/// A session id never matches a transcript path, even when the text is
+/// equal.
+#[derive(PartialEq)]
+enum Key<'a> {
+    Session(&'a str),
+    Transcript(&'a str),
+}
+
+fn key(entry: &Entry) -> Option<Key<'_>> {
+    match (entry.session.as_deref(), entry.transcript.as_deref()) {
+        (Some(s), _) if !s.is_empty() => Some(Key::Session(s)),
+        (_, Some(t)) if !t.is_empty() => Some(Key::Transcript(t)),
+        _ => None,
+    }
+}
+
+#[derive(Debug)]
+enum Failure {
+    Locked,
+    Io { path: PathBuf, source: io::Error },
+}
+
+impl fmt::Display for Failure {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Failure::Locked => f.write_str("errors.lock is held by another run"),
+            Failure::Io { path, source } => write!(f, "{}: {source}", path.display()),
+        }
+    }
+}
+
+impl From<lock::Error> for Failure {
+    fn from(e: lock::Error) -> Failure {
+        match e {
+            lock::Error::Locked => Failure::Locked,
+            lock::Error::Io { path, source } => Failure::Io { path, source },
+        }
+    }
+}
+
+fn io_at(path: &Path) -> impl FnOnce(io::Error) -> Failure + use<> {
+    let path = path.to_path_buf();
+    move |source| Failure::Io { path, source }
+}
+
+/// Appends `entry` to the log and says whether to alert. Never panics:
+/// the panic hook calls it.
+pub fn record(log: &Path, home: &Path, entry: &Entry) -> Alert {
+    record_within(log, home, entry, MAX_LEN, lock::TIMEOUT)
+}
+
+fn record_within(
+    log: &Path,
+    home: &Path,
+    entry: &Entry,
+    max_len: usize,
+    timeout: Duration,
+) -> Alert {
+    match append(log, entry, max_len, timeout) {
+        Ok(true) => Alert::No,
+        Ok(false) => Alert::Yes(format!(
+            "ganymede: couldn't archive this session ({}: {}). Details: {}",
+            entry.stage.as_str(),
+            one_line(&entry.error),
+            tilde(log, home),
+        )),
+        Err(failure) => {
+            // `eprintln!` panics on a closed stderr.
+            let mut stderr = io::stderr();
+            let _ = writeln!(
+                stderr,
+                "ganymede: couldn't write {}: {failure}",
+                log.display()
+            );
+            if let Ok(json) = serde_json::to_string(entry) {
+                let _ = writeln!(stderr, "{json}");
+            }
+            Alert::Yes(format!(
+                "ganymede: couldn't archive this session ({}: {}). The error log also failed ({}).",
+                entry.stage.as_str(),
+                one_line(&entry.error),
+                one_line(&failure.to_string()),
+            ))
+        }
+    }
+}
+
+/// Returns whether an earlier entry already alerted for this one.
+fn append(log: &Path, entry: &Entry, max_len: usize, timeout: Duration) -> Result<bool, Failure> {
+    let _lock = lock::acquire(&log.with_file_name("errors.lock"), timeout)?;
+    let mut text = read(log).map_err(io_at(log))?;
+    let seen = key(entry).is_some_and(|k| {
+        parse(&text).any(|e| e.stage == entry.stage && key(&e).as_ref() == Some(&k))
+    });
+    if text.len() > max_len {
+        text = rotate(log, &text)?;
+    }
+    let mut line = serde_json::to_vec(entry).map_err(|e| io_at(log)(e.into()))?;
+    line.push(b'\n');
+    if text.last().is_some_and(|&b| b != b'\n') {
+        line.insert(0, b'\n');
+    }
+    OpenOptions::new()
+        .create(true)
+        .append(true)
+        .mode(LOG_MODE)
+        .open(log)
+        .and_then(|mut f| f.write_all(&line))
+        .map_err(io_at(log))?;
+    Ok(seen)
+}
+
+/// Keeps the lines after the midpoint and returns them.
+fn rotate(log: &Path, text: &[u8]) -> Result<Vec<u8>, Failure> {
+    let mid = text.len() / 2;
+    let kept = match text[mid..].iter().position(|&b| b == b'\n') {
+        Some(i) => text[mid + i + 1..].to_vec(),
+        None => Vec::new(),
+    };
+    let dir = log.parent().unwrap_or(Path::new("."));
+    let mut tmp = tempfile::NamedTempFile::new_in(dir).map_err(io_at(dir))?;
+    let tmp_path = tmp.path().to_path_buf();
+    tmp.write_all(&kept).map_err(io_at(&tmp_path))?;
+    tmp.persist(log).map_err(|e| io_at(log)(e.error))?;
+    Ok(kept)
+}
+
+/// Up to `count` entries, newest first. Takes no lock: rotation renames
+/// atomically, and a torn last line is skipped like any malformed one.
+pub fn recent(log: &Path, count: usize) -> io::Result<Vec<Entry>> {
+    let text = read(log)?;
+    let mut entries: Vec<Entry> = parse(&text).collect();
+    entries.reverse();
+    entries.truncate(count);
+    Ok(entries)
+}
+
+fn read(log: &Path) -> io::Result<Vec<u8>> {
+    match fs::read(log) {
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(Vec::new()),
+        other => other,
+    }
+}
+
+fn parse(text: &[u8]) -> impl Iterator<Item = Entry> + '_ {
+    text.split(|&b| b == b'\n')
+        .filter_map(|line| serde_json::from_slice(line).ok())
+}
+
+fn one_line(s: &str) -> String {
+    s.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+fn tilde(path: &Path, home: &Path) -> String {
+    match path.strip_prefix(home) {
+        Ok(rest) if !home.as_os_str().is_empty() => format!("~/{}", rest.display()),
+        _ => path.display().to_string(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::os::unix::fs::PermissionsExt;
+
+    use tempfile::TempDir;
+
+    use super::*;
+
+    const HOME: &str = "/Users/someone";
+
+    struct Env {
+        tmp: TempDir,
+    }
+
+    impl Env {
+        fn new() -> Env {
+            Env {
+                tmp: tempfile::tempdir().unwrap(),
+            }
+        }
+
+        fn log(&self) -> PathBuf {
+            self.tmp.path().join("state/ganymede/errors.jsonl")
+        }
+
+        fn record(&self, entry: &Entry) -> Alert {
+            record_within(&self.log(), Path::new(HOME), entry, MAX_LEN, Duration::ZERO)
+        }
+
+        fn lines(&self) -> Vec<String> {
+            fs::read_to_string(self.log())
+                .unwrap()
+                .lines()
+                .map(String::from)
+                .collect()
+        }
+    }
+
+    fn entry(stage: Stage, session: Option<&str>, transcript: Option<&str>) -> Entry {
+        Entry {
+            session: session.map(String::from),
+            transcript: transcript.map(String::from),
+            ..Entry::new(stage, "boom".into())
+        }
+    }
+
+    fn is_yes(alert: &Alert) -> bool {
+        matches!(alert, Alert::Yes(_))
+    }
+
+    // --- entry ---
+
+    #[test]
+    fn serializes_keys_in_spec_order() {
+        let json = serde_json::to_string(&Entry::new(Stage::Parse, "x".into())).unwrap();
+        let value: serde_json::Value = serde_json::from_str(&json).unwrap();
+        let keys: Vec<&str> = value
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect();
+        assert_eq!(
+            keys,
+            [
+                "ts",
+                "version",
+                "harness",
+                "event",
+                "session",
+                "transcript",
+                "stage",
+                "error"
+            ]
+        );
+        assert_eq!(value["stage"], "parse");
+        assert_eq!(value["session"], serde_json::Value::Null);
+        assert!(value["ts"].as_str().unwrap().ends_with('Z'));
+    }
+
+    #[test]
+    fn round_trips() {
+        let e = Entry {
+            error: "say \"hi\"\n\tthen \\ leave".into(),
+            ..entry(Stage::Write, Some("abc"), None)
+        };
+        let back: Entry = serde_json::from_str(&serde_json::to_string(&e).unwrap()).unwrap();
+        assert_eq!(back, e);
+        assert_eq!(back.transcript, None);
+    }
+
+    // --- recent ---
+
+    fn seed(env: &Env, text: &str) {
+        fs::create_dir_all(env.log().parent().unwrap()).unwrap();
+        fs::write(env.log(), text).unwrap();
+    }
+
+    fn line(e: &Entry) -> String {
+        serde_json::to_string(e).unwrap() + "\n"
+    }
+
+    #[test]
+    fn recent_is_newest_first_and_limited() {
+        let env = Env::new();
+        let text: String = ["a", "b", "c"]
+            .map(|s| line(&entry(Stage::Parse, Some(s), None)))
+            .concat();
+        seed(&env, &text);
+        let got: Vec<String> = recent(&env.log(), 2)
+            .unwrap()
+            .into_iter()
+            .map(|e| e.session.unwrap())
+            .collect();
+        assert_eq!(got, ["c", "b"]);
+    }
+
+    #[test]
+    fn recent_of_a_missing_log_is_empty() {
+        let env = Env::new();
+        assert!(recent(&env.log(), 20).unwrap().is_empty());
+    }
+
+    #[test]
+    fn recent_skips_malformed_lines_and_unknown_stages() {
+        let env = Env::new();
+        let good = line(&entry(Stage::Parse, Some("a"), None));
+        let future = good.replace("\"parse\"", "\"teleport\"");
+        seed(&env, &format!("{good}not json\n{future}{{\"ts\":\"20"));
+        let got = recent(&env.log(), 20).unwrap();
+        assert_eq!(got.len(), 1);
+        assert_eq!(got[0].stage, Stage::Parse);
+    }
+
+    // --- dedupe ---
+
+    #[test]
+    fn same_session_and_stage_alerts_once() {
+        let env = Env::new();
+        assert!(is_yes(&env.record(&entry(
+            Stage::Parse,
+            Some("s"),
+            Some("/t")
+        ))));
+        assert_eq!(
+            env.record(&entry(Stage::Parse, Some("s"), Some("/other"))),
+            Alert::No
+        );
+        assert_eq!(env.lines().len(), 2);
+    }
+
+    #[test]
+    fn another_stage_alerts_again() {
+        let env = Env::new();
+        env.record(&entry(Stage::Parse, Some("s"), None));
+        assert!(is_yes(&env.record(&entry(Stage::Render, Some("s"), None))));
+    }
+
+    #[test]
+    fn transcript_is_the_key_without_a_session() {
+        let env = Env::new();
+        assert!(is_yes(&env.record(&entry(Stage::Detect, None, Some("/t")))));
+        assert_eq!(
+            env.record(&entry(Stage::Detect, None, Some("/t"))),
+            Alert::No
+        );
+    }
+
+    #[test]
+    fn no_key_always_alerts() {
+        let env = Env::new();
+        assert!(is_yes(&env.record(&entry(Stage::Payload, None, None))));
+        assert!(is_yes(&env.record(&entry(Stage::Payload, None, None))));
+    }
+
+    #[test]
+    fn empty_ids_are_no_key() {
+        let env = Env::new();
+        assert!(is_yes(&env.record(&entry(
+            Stage::Parse,
+            Some(""),
+            Some("")
+        ))));
+        assert!(is_yes(&env.record(&entry(
+            Stage::Parse,
+            Some(""),
+            Some("")
+        ))));
+    }
+
+    #[test]
+    fn session_never_matches_a_transcript() {
+        let env = Env::new();
+        env.record(&entry(Stage::Parse, None, Some("x")));
+        assert!(is_yes(&env.record(&entry(Stage::Parse, Some("x"), None))));
+    }
+
+    #[test]
+    fn concurrent_records_alert_once() {
+        let env = Env::new();
+        let log = env.log();
+        let e = entry(Stage::Parse, Some("s"), None);
+        let alerts: Vec<Alert> = std::thread::scope(|scope| {
+            let runs: Vec<_> = (0..8)
+                .map(|_| {
+                    scope.spawn(|| record_within(&log, Path::new(HOME), &e, MAX_LEN, lock::TIMEOUT))
+                })
+                .collect();
+            runs.into_iter().map(|r| r.join().unwrap()).collect()
+        });
+        assert_eq!(alerts.iter().filter(|a| is_yes(a)).count(), 1);
+        assert_eq!(env.lines().len(), 8);
+    }
+
+    #[test]
+    fn record_skips_a_garbage_line() {
+        let env = Env::new();
+        seed(&env, "not json\n");
+        assert!(is_yes(&env.record(&entry(Stage::Parse, Some("s"), None))));
+        assert_eq!(env.record(&entry(Stage::Parse, Some("s"), None)), Alert::No);
+    }
+
+    #[test]
+    fn appends_after_a_torn_line() {
+        let env = Env::new();
+        seed(&env, "{\"ts\":\"20");
+        assert!(is_yes(&env.record(&entry(Stage::Parse, Some("s"), None))));
+        assert_eq!(env.record(&entry(Stage::Parse, Some("s"), None)), Alert::No);
+        assert_eq!(env.lines().len(), 3);
+    }
+
+    #[test]
+    fn log_is_private_from_the_first_write() {
+        let env = Env::new();
+        env.record(&entry(Stage::Parse, Some("s"), None));
+        let mode = fs::metadata(env.log()).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600, "{mode:o}");
+    }
+
+    // --- alert text ---
+
+    #[test]
+    fn alert_names_stage_error_and_log() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path();
+        let log = home.join(".local/state/ganymede/errors.jsonl");
+        let e = Entry::new(Stage::Parse, "bad\n  line\tthree".into());
+        assert_eq!(
+            record_within(&log, home, &e, MAX_LEN, Duration::ZERO),
+            Alert::Yes(
+                "ganymede: couldn't archive this session (parse: bad line three). \
+                 Details: ~/.local/state/ganymede/errors.jsonl"
+                    .into()
+            )
+        );
+    }
+
+    #[test]
+    fn tilde_matches_whole_components() {
+        let home = Path::new("/Users/ryan");
+        assert_eq!(
+            tilde(Path::new("/Users/ryan/x/e.jsonl"), home),
+            "~/x/e.jsonl"
+        );
+        assert_eq!(
+            tilde(Path::new("/Users/ryan2/e.jsonl"), home),
+            "/Users/ryan2/e.jsonl"
+        );
+    }
+
+    // --- rotation ---
+
+    fn record_small(env: &Env, e: &Entry, max_len: usize) -> Alert {
+        record_within(&env.log(), Path::new(HOME), e, max_len, Duration::ZERO)
+    }
+
+    #[test]
+    fn rotation_keeps_the_newer_half_on_a_line_boundary() {
+        let env = Env::new();
+        for s in ["a", "b", "c", "d"] {
+            env.record(&entry(Stage::Parse, Some(s), None));
+        }
+        let before = env.lines();
+        let len = fs::metadata(env.log()).unwrap().len() as usize;
+        record_small(&env, &entry(Stage::Parse, Some("e"), None), len - 1);
+        let after = env.lines();
+        assert_eq!(
+            after[..after.len() - 1],
+            before[before.len() - after.len() + 1..]
+        );
+        assert!(after.len() < before.len());
+        assert!(after.last().unwrap().contains("\"e\""));
+    }
+
+    #[test]
+    fn dedupe_sees_an_entry_rotation_drops() {
+        let env = Env::new();
+        for s in ["a", "b", "c", "d"] {
+            env.record(&entry(Stage::Parse, Some(s), None));
+        }
+        let len = fs::metadata(env.log()).unwrap().len() as usize;
+        assert_eq!(
+            record_small(&env, &entry(Stage::Parse, Some("a"), None), len - 1),
+            Alert::No
+        );
+        assert!(!env.lines()[0].contains("\"a\""));
+    }
+
+    #[test]
+    fn one_huge_line_empties_the_log() {
+        let env = Env::new();
+        seed(&env, &"x".repeat(100));
+        record_small(&env, &entry(Stage::Parse, Some("s"), None), 50);
+        let lines = env.lines();
+        assert_eq!(lines.len(), 1);
+        assert!(lines[0].contains("\"s\""));
+    }
+
+    // --- fallback ---
+
+    fn is_fallback(alert: &Alert) -> bool {
+        matches!(alert, Alert::Yes(m) if m.contains("The error log also failed"))
+    }
+
+    #[test]
+    fn unwritable_log_alerts_every_time() {
+        let env = Env::new();
+        let state = env.log().parent().unwrap().to_path_buf();
+        fs::create_dir_all(&state).unwrap();
+        fs::set_permissions(&state, fs::Permissions::from_mode(0o555)).unwrap();
+        let e = entry(Stage::Parse, Some("s"), None);
+        let first = env.record(&e);
+        let second = env.record(&e);
+        fs::set_permissions(&state, fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(is_fallback(&first), "{first:?}");
+        assert!(is_fallback(&second), "{second:?}");
+    }
+
+    #[test]
+    fn held_lock_falls_back() {
+        let env = Env::new();
+        let _held =
+            lock::acquire(&env.log().with_file_name("errors.lock"), Duration::ZERO).unwrap();
+        let alert = env.record(&entry(Stage::Parse, Some("s"), None));
+        assert!(is_fallback(&alert), "{alert:?}");
+        assert!(!env.log().exists());
+    }
+}
