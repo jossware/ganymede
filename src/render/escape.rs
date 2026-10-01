@@ -315,49 +315,63 @@ fn prose(lines: &[&str]) -> String {
 /// content column is code, and anything less is the item's continuation.
 fn indented_code(lines: &[&str]) -> Vec<bool> {
     let mut code = vec![false; lines.len()];
-    let mut margins: Vec<usize> = Vec::new();
-    let mut after_blank = true;
-    let mut in_code = false;
+    let mut items: Vec<Item> = Vec::new();
+    let mut paragraph = false;
     for (i, line) in lines.iter().enumerate() {
         if is_blank(line) {
-            after_blank = true;
+            paragraph = false;
             continue;
         }
         let width = indent_width(line);
-        let margin = margins.last().copied().unwrap_or(0);
+        let margin = items.last().map_or(0, |item| item.content);
         if width >= margin + 4 {
             // Indented code cannot interrupt a paragraph.
-            if after_blank || in_code {
-                code[i] = true;
-                in_code = true;
-                after_blank = false;
-            }
+            code[i] = !paragraph;
             continue;
         }
-        in_code = false;
-        if after_blank {
-            margins.retain(|&m| m <= width);
+        let open = list_item(line, width).filter(|item| {
+            // Only a non-empty bullet or a list from 1 may interrupt a paragraph,
+            // unless the item joins a list already open.
+            let sibling = items.iter().find(|open| open.content > width);
+            !paragraph
+                || sibling.is_some_and(|open| open.kind == item.kind)
+                || (!item.empty && item.number.is_none_or(|n| n == 1))
+        });
+        if open.is_some() || !paragraph {
+            items.retain(|item| item.content <= width);
         }
-        if let Some(content) = list_item(line, width) {
-            margins.retain(|&m| m <= width);
-            margins.push(content);
+        let mut next = open;
+        while let Some(item) = next {
+            next = item.rest.and_then(|rest| list_item(rest, item.content));
+            items.push(item);
         }
-        after_blank = false;
+        paragraph = true;
     }
     code
 }
 
-/// The content column of the list item `line` opens, if it opens one.
-fn list_item(line: &str, width: usize) -> Option<usize> {
+struct Item<'a> {
+    /// The bullet character, or the ordered delimiter.
+    kind: char,
+    number: Option<u32>,
+    content: usize,
+    empty: bool,
+    /// Content that may open a nested item on the same line.
+    rest: Option<&'a str>,
+}
+
+/// The list item `line` opens, if it opens one.
+fn list_item(line: &str, width: usize) -> Option<Item<'_>> {
     let body = line.trim_start_matches([' ', '\t']);
-    let marker = if body.starts_with(['-', '*', '+']) {
-        1
+    let (kind, number, marker) = if body.starts_with(['-', '*', '+']) {
+        (body.chars().next()?, None, 1)
     } else {
         let digits = body.bytes().take_while(u8::is_ascii_digit).count();
-        if !(1..=9).contains(&digits) || !body[digits..].starts_with(['.', ')']) {
+        let kind = body[digits..].chars().next()?;
+        if !(1..=9).contains(&digits) || !matches!(kind, '.' | ')') {
             return None;
         }
-        digits + 1
+        (kind, body[..digits].parse().ok(), digits + 1)
     };
     let rest = &body[marker..];
     let start = width + marker;
@@ -370,13 +384,19 @@ fn list_item(line: &str, width: usize) -> Option<usize> {
         }
     }
     let gap = col - start;
-    if is_blank(rest) || gap > 4 {
-        Some(start + 1)
-    } else if gap == 0 {
-        None
-    } else {
-        Some(col)
+    let empty = is_blank(rest);
+    if gap == 0 && !empty {
+        return None;
     }
+    // Five columns or more after the marker is code, which starts one in.
+    let nested = !empty && gap <= 4;
+    Some(Item {
+        kind,
+        number,
+        content: if nested { col } else { start + 1 },
+        empty,
+        rest: nested.then(|| rest.trim_start_matches([' ', '\t'])),
+    })
 }
 
 fn is_underline(line: &str) -> bool {
@@ -522,6 +542,25 @@ mod tests {
             ),
             ("- item\n\nback\n\n    x < y", "- item\n\nback\n\n    x < y"),
             ("```\nf\n```\n    x < y", "```\nf\n```\n    x < y"),
+            ("- - item\n\n      <x>", "- - item\n\n      &lt;x&gt;"),
+            ("1. - item\n\n         x < y", "1. - item\n\n         x < y"),
+            ("a\n2. b\n\n    x < y", "a\n2. b\n\n    x < y"),
+            ("a\n1. b\n\n    <x>", "a\n1. b\n\n    &lt;x&gt;"),
+            ("1. a\n2. b\n\n    <x>", "1. a\n2. b\n\n    &lt;x&gt;"),
+            (
+                "10. a\n2) b\n\n       <x>",
+                "10. a\n2) b\n\n       &lt;x&gt;",
+            ),
+            (
+                "- a\n    lazy\nback\n\n    <x>",
+                "- a\n    lazy\nback\n\n    &lt;x&gt;",
+            ),
+            ("a\n-     b\n\n    <x>", "a\n-     b\n\n    &lt;x&gt;"),
+            (
+                "- a\n\n      <c>\nback\n\n    x < y",
+                "- a\n\n      <c>\nback\n\n    x < y",
+            ),
+            ("a\n-\n\n    x < y", "a\n\\-\n\n    x < y"),
         ] {
             assert_eq!(markdown(text), want, "text: {text:?}");
         }
