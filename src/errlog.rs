@@ -214,8 +214,9 @@ fn to_line(entry: &Entry) -> serde_json::Result<Vec<u8>> {
 /// half, and returns them.
 fn rotate(log: &Path, text: &[u8], room: usize) -> Result<Vec<u8>, Failure> {
     let cut = (text.len() / 2).max(text.len().saturating_sub(room));
-    let kept = match text[cut..].iter().position(|&b| b == b'\n') {
-        Some(i) => text[cut + i + 1..].to_vec(),
+    let from = cut.saturating_sub(1);
+    let kept = match text[from..].iter().position(|&b| b == b'\n') {
+        Some(i) => text[from + i + 1..].to_vec(),
         None => Vec::new(),
     };
     let dir = log.parent().unwrap_or(Path::new("."));
@@ -636,6 +637,23 @@ mod tests {
         let _ = record_small(&env, &e, max_len);
         assert!(!env.lines()[0].contains("\"a\""), "did not rotate");
         assert!(fs::metadata(env.log()).unwrap().len() as usize <= max_len);
+    }
+
+    #[test]
+    fn rotation_cut_on_a_line_start_keeps_that_line() {
+        let env = Env::new();
+        let text: String = ["a", "b", "c", "d"]
+            .map(|s| line(&entry(Stage::Parse, Some(s), None)))
+            .concat();
+        seed(&env, &text);
+        let e = entry(Stage::Parse, Some("e"), None);
+        let _ = record_small(&env, &e, text.len() / 2 + line(&e).len());
+        let sessions: Vec<String> = recent(&env.log(), 20)
+            .unwrap()
+            .into_iter()
+            .map(|e| e.session.unwrap())
+            .collect();
+        assert_eq!(sessions, ["e", "d", "c"]);
     }
 
     #[test]
