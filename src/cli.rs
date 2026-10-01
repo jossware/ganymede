@@ -65,12 +65,16 @@ impl RenderOpts {
 }
 
 /// Whether the subcommand is `hook`, judged before clap parses, since
-/// `hook` MUST exit 0 even when its arguments are bad.
+/// `hook` MUST exit 0 even when its arguments are bad. A flag misplaced
+/// before `hook` can put its value first, so any `hook` counts unless
+/// another subcommand clearly leads.
 pub fn is_hook(args: &[OsString]) -> bool {
-    args.iter()
-        .skip(1)
+    let rest = &args[args.len().min(1)..];
+    let leads_elsewhere = rest
+        .iter()
         .find(|a| !a.to_string_lossy().starts_with('-'))
-        .is_some_and(|a| a == "hook")
+        .is_some_and(|a| a == "render" || a == "errors");
+    !leads_elsewhere && rest.iter().any(|a| a == "hook")
 }
 
 #[cfg(test)]
@@ -110,5 +114,8 @@ mod tests {
         assert!(is_hook(&args(&["ganymede", "--bogus", "hook"])));
         assert!(!is_hook(&args(&["ganymede", "render", "hook"])));
         assert!(!is_hook(&args(&["ganymede"])));
+        assert!(is_hook(&args(&["ganymede", "--dir", "/x", "hook"])));
+        assert!(is_hook(&args(&["ganymede", "-n", "3", "hook"])));
+        assert!(!is_hook(&args(&["ganymede", "errors", "-n", "hook"])));
     }
 }
