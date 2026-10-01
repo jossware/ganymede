@@ -68,6 +68,7 @@ impl Entry {
 }
 
 #[derive(Debug, PartialEq)]
+#[must_use = "an alert must be printed as a systemMessage"]
 pub enum Alert {
     Yes(String),
     No,
@@ -121,7 +122,7 @@ fn io_at(path: &Path) -> impl FnOnce(io::Error) -> Failure + use<> {
 /// Appends `entry` to the log and says whether to alert. Never panics:
 /// the panic hook calls it.
 pub fn record(log: &Path, home: &Path, entry: &Entry) -> Alert {
-    record_within(log, home, entry, MAX_LEN, lock::TIMEOUT)
+    record_within(log, home, entry, MAX_LEN, lock::TIMEOUT, &mut io::stderr())
 }
 
 fn record_within(
@@ -130,8 +131,9 @@ fn record_within(
     entry: &Entry,
     max_len: usize,
     timeout: Duration,
+    stderr: &mut dyn Write,
 ) -> Alert {
-    match append(log, entry, max_len, timeout) {
+    match check_seen_and_append(log, entry, max_len, timeout) {
         Ok(true) => Alert::No,
         Ok(false) => Alert::Yes(format!(
             "ganymede: couldn't archive this session ({}: {}). Details: {}",
@@ -141,7 +143,6 @@ fn record_within(
         )),
         Err(failure) => {
             // `eprintln!` panics on a closed stderr.
-            let mut stderr = io::stderr();
             let _ = writeln!(
                 stderr,
                 "ganymede: couldn't write {}: {failure}",
@@ -161,7 +162,12 @@ fn record_within(
 }
 
 /// Returns whether an earlier entry already alerted for this one.
-fn append(log: &Path, entry: &Entry, max_len: usize, timeout: Duration) -> Result<bool, Failure> {
+fn check_seen_and_append(
+    log: &Path,
+    entry: &Entry,
+    max_len: usize,
+    timeout: Duration,
+) -> Result<bool, Failure> {
     let _lock = lock::acquire(&log.with_file_name("errors.lock"), timeout)?;
     let mut text = read(log).map_err(io_at(log))?;
     let seen = key(entry).is_some_and(|k| {
@@ -259,7 +265,14 @@ mod tests {
         }
 
         fn record(&self, entry: &Entry) -> Alert {
-            record_within(&self.log(), Path::new(HOME), entry, MAX_LEN, Duration::ZERO)
+            record_within(
+                &self.log(),
+                Path::new(HOME),
+                entry,
+                MAX_LEN,
+                Duration::ZERO,
+                &mut io::sink(),
+            )
         }
 
         fn lines(&self) -> Vec<String> {
@@ -351,6 +364,15 @@ mod tests {
     }
 
     #[test]
+    fn recent_reads_an_omitted_optional_key_as_none() {
+        let env = Env::new();
+        let e = entry(Stage::Parse, Some("s"), None);
+        seed(&env, &line(&e).replace("\"harness\":null,", ""));
+        assert!(!fs::read_to_string(env.log()).unwrap().contains("harness"));
+        assert_eq!(recent(&env.log(), 20).unwrap(), [e]);
+    }
+
+    #[test]
     fn recent_of_a_missing_log_is_empty() {
         let env = Env::new();
         assert!(recent(&env.log(), 20).unwrap().is_empty());
@@ -387,7 +409,7 @@ mod tests {
     #[test]
     fn another_stage_alerts_again() {
         let env = Env::new();
-        env.record(&entry(Stage::Parse, Some("s"), None));
+        let _ = env.record(&entry(Stage::Parse, Some("s"), None));
         assert!(is_yes(&env.record(&entry(Stage::Render, Some("s"), None))));
     }
 
@@ -426,7 +448,7 @@ mod tests {
     #[test]
     fn session_never_matches_a_transcript() {
         let env = Env::new();
-        env.record(&entry(Stage::Parse, None, Some("x")));
+        let _ = env.record(&entry(Stage::Parse, None, Some("x")));
         assert!(is_yes(&env.record(&entry(Stage::Parse, Some("x"), None))));
     }
 
@@ -438,7 +460,16 @@ mod tests {
         let alerts: Vec<Alert> = std::thread::scope(|scope| {
             let runs: Vec<_> = (0..8)
                 .map(|_| {
-                    scope.spawn(|| record_within(&log, Path::new(HOME), &e, MAX_LEN, lock::TIMEOUT))
+                    scope.spawn(|| {
+                        record_within(
+                            &log,
+                            Path::new(HOME),
+                            &e,
+                            MAX_LEN,
+                            lock::TIMEOUT,
+                            &mut io::sink(),
+                        )
+                    })
                 })
                 .collect();
             runs.into_iter().map(|r| r.join().unwrap()).collect()
@@ -467,7 +498,7 @@ mod tests {
     #[test]
     fn log_is_private_from_the_first_write() {
         let env = Env::new();
-        env.record(&entry(Stage::Parse, Some("s"), None));
+        let _ = env.record(&entry(Stage::Parse, Some("s"), None));
         let mode = fs::metadata(env.log()).unwrap().permissions().mode() & 0o777;
         assert_eq!(mode, 0o600, "{mode:o}");
     }
@@ -481,7 +512,7 @@ mod tests {
         let log = home.join(".local/state/ganymede/errors.jsonl");
         let e = Entry::new(Stage::Parse, "bad\n  line\tthree".into());
         assert_eq!(
-            record_within(&log, home, &e, MAX_LEN, Duration::ZERO),
+            record_within(&log, home, &e, MAX_LEN, Duration::ZERO, &mut io::sink()),
             Alert::Yes(
                 "ganymede: couldn't archive this session (parse: bad line three). \
                  Details: ~/.local/state/ganymede/errors.jsonl"
@@ -506,18 +537,25 @@ mod tests {
     // --- rotation ---
 
     fn record_small(env: &Env, e: &Entry, max_len: usize) -> Alert {
-        record_within(&env.log(), Path::new(HOME), e, max_len, Duration::ZERO)
+        record_within(
+            &env.log(),
+            Path::new(HOME),
+            e,
+            max_len,
+            Duration::ZERO,
+            &mut io::sink(),
+        )
     }
 
     #[test]
     fn rotation_keeps_the_newer_half_on_a_line_boundary() {
         let env = Env::new();
         for s in ["a", "b", "c", "d"] {
-            env.record(&entry(Stage::Parse, Some(s), None));
+            let _ = env.record(&entry(Stage::Parse, Some(s), None));
         }
         let before = env.lines();
         let len = fs::metadata(env.log()).unwrap().len() as usize;
-        record_small(&env, &entry(Stage::Parse, Some("e"), None), len - 1);
+        let _ = record_small(&env, &entry(Stage::Parse, Some("e"), None), len - 1);
         let after = env.lines();
         assert_eq!(
             after[..after.len() - 1],
@@ -531,7 +569,7 @@ mod tests {
     fn dedupe_sees_an_entry_rotation_drops() {
         let env = Env::new();
         for s in ["a", "b", "c", "d"] {
-            env.record(&entry(Stage::Parse, Some(s), None));
+            let _ = env.record(&entry(Stage::Parse, Some(s), None));
         }
         let len = fs::metadata(env.log()).unwrap().len() as usize;
         assert_eq!(
@@ -542,10 +580,25 @@ mod tests {
     }
 
     #[test]
+    fn rotation_keeping_a_torn_line_starts_a_new_line() {
+        let env = Env::new();
+        let text: String = ["a", "b", "c", "d"]
+            .map(|s| line(&entry(Stage::Parse, Some(s), None)))
+            .concat();
+        seed(&env, &format!("{text}{{\"ts\":\"20"));
+        let len = fs::metadata(env.log()).unwrap().len() as usize;
+        let _ = record_small(&env, &entry(Stage::Parse, Some("e"), None), len - 1);
+        let lines = env.lines();
+        assert!(!lines[0].contains("\"a\""), "did not rotate");
+        assert_eq!(lines[lines.len() - 2], "{\"ts\":\"20");
+        assert!(lines[lines.len() - 1].contains("\"e\""));
+    }
+
+    #[test]
     fn one_huge_line_empties_the_log() {
         let env = Env::new();
         seed(&env, &"x".repeat(100));
-        record_small(&env, &entry(Stage::Parse, Some("s"), None), 50);
+        let _ = record_small(&env, &entry(Stage::Parse, Some("s"), None), 50);
         let lines = env.lines();
         assert_eq!(lines.len(), 1);
         assert!(lines[0].contains("\"s\""));
@@ -572,6 +625,31 @@ mod tests {
     }
 
     #[test]
+    fn unreadable_log_under_the_lock_alerts_every_time() {
+        let env = Env::new();
+        fs::create_dir_all(env.log()).unwrap();
+        let e = entry(Stage::Parse, Some("s"), None);
+        for _ in 0..2 {
+            let mut stderr = Vec::new();
+            let alert = record_within(
+                &env.log(),
+                Path::new(HOME),
+                &e,
+                MAX_LEN,
+                Duration::ZERO,
+                &mut stderr,
+            );
+            assert!(is_fallback(&alert), "{alert:?}");
+            let text = String::from_utf8(stderr).unwrap();
+            let log = env.log().display().to_string();
+            assert!(
+                text.starts_with(&format!("ganymede: couldn't write {log}: {log}: ")),
+                "{text}"
+            );
+        }
+    }
+
+    #[test]
     fn held_lock_falls_back() {
         let env = Env::new();
         let _held =
@@ -579,5 +657,33 @@ mod tests {
         let alert = env.record(&entry(Stage::Parse, Some("s"), None));
         assert!(is_fallback(&alert), "{alert:?}");
         assert!(!env.log().exists());
+    }
+
+    #[test]
+    fn fallback_writes_the_failure_and_the_entry_to_stderr() {
+        let env = Env::new();
+        let _held =
+            lock::acquire(&env.log().with_file_name("errors.lock"), Duration::ZERO).unwrap();
+        let e = entry(Stage::Parse, Some("s"), None);
+        let mut stderr = Vec::new();
+        let _ = record_within(
+            &env.log(),
+            Path::new(HOME),
+            &e,
+            MAX_LEN,
+            Duration::ZERO,
+            &mut stderr,
+        );
+        let text = String::from_utf8(stderr).unwrap();
+        let lines: Vec<&str> = text.lines().collect();
+        assert_eq!(lines.len(), 2, "{text}");
+        assert_eq!(
+            lines[0],
+            format!(
+                "ganymede: couldn't write {}: errors.lock is held by another run",
+                env.log().display()
+            )
+        );
+        assert_eq!(serde_json::from_str::<Entry>(lines[1]).unwrap(), e);
     }
 }
