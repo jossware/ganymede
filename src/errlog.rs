@@ -11,6 +11,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::lock;
 
+const MAX_LEN: usize = 1024 * 1024;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Stage {
@@ -116,11 +118,17 @@ fn io_at(path: &Path) -> impl FnOnce(io::Error) -> Failure + use<> {
 /// Appends `entry` to the log and says whether to alert. Never panics:
 /// the panic hook calls it.
 pub fn record(log: &Path, home: &Path, entry: &Entry) -> Alert {
-    record_within(log, home, entry, lock::TIMEOUT)
+    record_within(log, home, entry, MAX_LEN, lock::TIMEOUT)
 }
 
-fn record_within(log: &Path, home: &Path, entry: &Entry, timeout: Duration) -> Alert {
-    match append(log, entry, timeout) {
+fn record_within(
+    log: &Path,
+    home: &Path,
+    entry: &Entry,
+    max_len: usize,
+    timeout: Duration,
+) -> Alert {
+    match append(log, entry, max_len, timeout) {
         Ok(true) => Alert::No,
         Ok(false) => Alert::Yes(format!(
             "ganymede: couldn't archive this session ({}: {}). Details: {}",
@@ -150,12 +158,15 @@ fn record_within(log: &Path, home: &Path, entry: &Entry, timeout: Duration) -> A
 }
 
 /// Returns whether an earlier entry already alerted for this one.
-fn append(log: &Path, entry: &Entry, timeout: Duration) -> Result<bool, Failure> {
+fn append(log: &Path, entry: &Entry, max_len: usize, timeout: Duration) -> Result<bool, Failure> {
     let _lock = lock::acquire(&log.with_file_name("errors.lock"), timeout)?;
-    let text = read(log).map_err(io_at(log))?;
+    let mut text = read(log).map_err(io_at(log))?;
     let seen = key(entry).is_some_and(|k| {
         parse(&text).any(|e| e.stage == entry.stage && key(&e).as_ref() == Some(&k))
     });
+    if text.len() > max_len {
+        text = rotate(log, &text)?;
+    }
     let mut line = serde_json::to_vec(entry).map_err(|e| io_at(log)(e.into()))?;
     line.push(b'\n');
     if text.last().is_some_and(|&b| b != b'\n') {
@@ -168,6 +179,21 @@ fn append(log: &Path, entry: &Entry, timeout: Duration) -> Result<bool, Failure>
         .and_then(|mut f| f.write_all(&line))
         .map_err(io_at(log))?;
     Ok(seen)
+}
+
+/// Keeps the lines after the midpoint and returns them.
+fn rotate(log: &Path, text: &[u8]) -> Result<Vec<u8>, Failure> {
+    let mid = text.len() / 2;
+    let kept = match text[mid..].iter().position(|&b| b == b'\n') {
+        Some(i) => text[mid + i + 1..].to_vec(),
+        None => Vec::new(),
+    };
+    let dir = log.parent().unwrap_or(Path::new("."));
+    let mut tmp = tempfile::NamedTempFile::new_in(dir).map_err(io_at(dir))?;
+    let tmp_path = tmp.path().to_path_buf();
+    tmp.write_all(&kept).map_err(io_at(&tmp_path))?;
+    tmp.persist(log).map_err(|e| io_at(log)(e.error))?;
+    Ok(kept)
 }
 
 /// Up to `count` entries, newest first. Takes no lock: rotation renames
@@ -229,7 +255,7 @@ mod tests {
         }
 
         fn record(&self, entry: &Entry) -> Alert {
-            record_within(&self.log(), Path::new(HOME), entry, Duration::ZERO)
+            record_within(&self.log(), Path::new(HOME), entry, MAX_LEN, Duration::ZERO)
         }
 
         fn lines(&self) -> Vec<String> {
@@ -407,7 +433,9 @@ mod tests {
         let e = entry(Stage::Parse, Some("s"), None);
         let alerts: Vec<Alert> = std::thread::scope(|scope| {
             let runs: Vec<_> = (0..8)
-                .map(|_| scope.spawn(|| record_within(&log, Path::new(HOME), &e, lock::TIMEOUT)))
+                .map(|_| {
+                    scope.spawn(|| record_within(&log, Path::new(HOME), &e, MAX_LEN, lock::TIMEOUT))
+                })
                 .collect();
             runs.into_iter().map(|r| r.join().unwrap()).collect()
         });
@@ -441,7 +469,7 @@ mod tests {
         let log = home.join(".local/state/ganymede/errors.jsonl");
         let e = Entry::new(Stage::Parse, "bad\n  line\tthree".into());
         assert_eq!(
-            record_within(&log, home, &e, Duration::ZERO),
+            record_within(&log, home, &e, MAX_LEN, Duration::ZERO),
             Alert::Yes(
                 "ganymede: couldn't archive this session (parse: bad line three). \
                  Details: ~/.local/state/ganymede/errors.jsonl"
@@ -461,6 +489,54 @@ mod tests {
             tilde(Path::new("/Users/ryan2/e.jsonl"), home),
             "/Users/ryan2/e.jsonl"
         );
+    }
+
+    // --- rotation ---
+
+    fn record_small(env: &Env, e: &Entry, max_len: usize) -> Alert {
+        record_within(&env.log(), Path::new(HOME), e, max_len, Duration::ZERO)
+    }
+
+    #[test]
+    fn rotation_keeps_the_newer_half_on_a_line_boundary() {
+        let env = Env::new();
+        for s in ["a", "b", "c", "d"] {
+            env.record(&entry(Stage::Parse, Some(s), None));
+        }
+        let before = env.lines();
+        let len = fs::metadata(env.log()).unwrap().len() as usize;
+        record_small(&env, &entry(Stage::Parse, Some("e"), None), len - 1);
+        let after = env.lines();
+        assert_eq!(
+            after[..after.len() - 1],
+            before[before.len() - after.len() + 1..]
+        );
+        assert!(after.len() < before.len());
+        assert!(after.last().unwrap().contains("\"e\""));
+    }
+
+    #[test]
+    fn dedupe_sees_an_entry_rotation_drops() {
+        let env = Env::new();
+        for s in ["a", "b", "c", "d"] {
+            env.record(&entry(Stage::Parse, Some(s), None));
+        }
+        let len = fs::metadata(env.log()).unwrap().len() as usize;
+        assert_eq!(
+            record_small(&env, &entry(Stage::Parse, Some("a"), None), len - 1),
+            Alert::No
+        );
+        assert!(!env.lines()[0].contains("\"a\""));
+    }
+
+    #[test]
+    fn one_huge_line_empties_the_log() {
+        let env = Env::new();
+        seed(&env, &"x".repeat(100));
+        record_small(&env, &entry(Stage::Parse, Some("s"), None), 50);
+        let lines = env.lines();
+        assert_eq!(lines.len(), 1);
+        assert!(lines[0].contains("\"s\""));
     }
 
     // --- fallback ---
