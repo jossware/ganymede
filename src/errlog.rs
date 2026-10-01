@@ -629,11 +629,24 @@ mod tests {
         let env = Env::new();
         fs::create_dir_all(env.log()).unwrap();
         let e = entry(Stage::Parse, Some("s"), None);
-        let first = env.record(&e);
-        let second = env.record(&e);
-        assert!(is_fallback(&first), "{first:?}");
-        assert!(is_fallback(&second), "{second:?}");
-        assert!(env.log().with_file_name("errors.lock").exists());
+        for _ in 0..2 {
+            let mut stderr = Vec::new();
+            let alert = record_within(
+                &env.log(),
+                Path::new(HOME),
+                &e,
+                MAX_LEN,
+                Duration::ZERO,
+                &mut stderr,
+            );
+            assert!(is_fallback(&alert), "{alert:?}");
+            let text = String::from_utf8(stderr).unwrap();
+            let log = env.log().display().to_string();
+            assert!(
+                text.starts_with(&format!("ganymede: couldn't write {log}: {log}: ")),
+                "{text}"
+            );
+        }
     }
 
     #[test]
