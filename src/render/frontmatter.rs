@@ -44,7 +44,7 @@ pub fn frontmatter(
         out.push_str(&format!("days: [{}]\n", items.join(", ")));
     }
 
-    field(&mut out, "project", Some(project));
+    name_field(&mut out, "project", Some(project));
     field(&mut out, "harness", Some(session.harness.id()));
     field(
         &mut out,
@@ -54,7 +54,7 @@ pub fn frontmatter(
     field(&mut out, "model", session.model.as_deref());
     field(&mut out, "session", Some(&session.id));
     field(&mut out, "cc_version", session.cc_version.as_deref());
-    field(&mut out, "worktree", worktree);
+    name_field(&mut out, "worktree", worktree);
     let transcript = session.transcript.to_string_lossy();
     field(&mut out, "transcript", Some(&transcript));
     if !session.unhandled.is_empty() {
@@ -70,6 +70,27 @@ fn field(out: &mut String, key: &str, value: Option<&str>) {
     if let Some(value) = value.filter(|v| !v.is_empty()) {
         out.push_str(&format!("{key}: {}\n", scalar(value)));
     }
+}
+
+/// A project or worktree name MUST read back as a string, or a Base
+/// filter comparing it to text misses the note.
+fn name_field(out: &mut String, key: &str, value: Option<&str>) {
+    if let Some(value) = value.filter(|v| !v.is_empty()) {
+        let value = if reads_as_non_string(value) {
+            quote(value)
+        } else {
+            scalar(value)
+        };
+        out.push_str(&format!("{key}: {value}\n"));
+    }
+}
+
+/// YAML 1.1 and 1.2 read a leading digit as a number or timestamp, and
+/// these words as booleans or null.
+fn reads_as_non_string(value: &str) -> bool {
+    const WORDS: [&str; 9] = ["true", "false", "null", "yes", "no", "on", "off", "y", "n"];
+    value.as_bytes().first().is_some_and(u8::is_ascii_digit)
+        || WORDS.iter().any(|w| value.eq_ignore_ascii_case(w))
 }
 
 /// Bare only when YAML cannot read the value as anything but this string.
@@ -243,6 +264,37 @@ transcript: t.jsonl
         assert_eq!(line(&fm, "model"), Some("claude:x"));
         assert_eq!(line(&fm, "harness_version"), Some("2.1.259"));
         assert_eq!(line(&fm, "session"), None);
+    }
+
+    #[test]
+    fn names_yaml_reads_as_non_strings_are_quoted() {
+        let s = Session::new(Harness::Claude, "t.jsonl".into());
+        let quoted = [
+            "2025",
+            "1.5",
+            "1:20",
+            "1e5",
+            "0x1F",
+            "2026-09-30",
+            "2026-09-30T12:00:00Z",
+            "TRUE",
+            "Off",
+            "null",
+            "y",
+        ];
+        for name in quoted {
+            let fm = frontmatter(&s, name, Some(name), &tz());
+            let want = format!("\"{name}\"");
+            assert_eq!(line(&fm, "project"), Some(want.as_str()), "{name}");
+            assert_eq!(line(&fm, "worktree"), Some(want.as_str()), "{name}");
+        }
+        for name in ["ganymede", "v2", "yesterday", "nonce", "online"] {
+            let fm = frontmatter(&s, name, Some(name), &tz());
+            assert_eq!(line(&fm, "project"), Some(name), "{name}");
+            assert_eq!(line(&fm, "worktree"), Some(name), "{name}");
+        }
+        let fm = frontmatter(&s, "2 b#c", None, &tz());
+        assert_eq!(line(&fm, "project"), Some("\"2 b#c\""));
     }
 
     #[test]
