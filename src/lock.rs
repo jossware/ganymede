@@ -67,13 +67,20 @@ pub fn acquire(path: &Path, timeout: Duration) -> Result<Lock, Error> {
     loop {
         match fs4::FileExt::try_lock(&file) {
             Ok(()) => return Ok(Lock { _file: file }),
-            Err(fs4::TryLockError::WouldBlock) if Instant::now() < deadline => {
-                thread::sleep(RETRY);
-            }
-            Err(fs4::TryLockError::WouldBlock) => return Err(Error::Locked),
+            Err(fs4::TryLockError::WouldBlock) => match pause(Instant::now(), deadline) {
+                Some(wait) => thread::sleep(wait),
+                None => return Err(Error::Locked),
+            },
             Err(fs4::TryLockError::Error(e)) => return Err(io_at(path)(e)),
         }
     }
+}
+
+/// How long to wait before the next attempt, or `None` once the deadline
+/// has passed. The last wait ends at the deadline for a final attempt.
+fn pause(now: Instant, deadline: Instant) -> Option<Duration> {
+    let left = deadline.checked_duration_since(now)?;
+    (!left.is_zero()).then(|| RETRY.min(left))
 }
 
 #[cfg(test)]
@@ -88,6 +95,16 @@ mod tests {
         assert!(matches!(acquire(&path, Duration::ZERO), Err(Error::Locked)));
         drop(first);
         let _lock = acquire(&path, Duration::ZERO).unwrap();
+    }
+
+    #[test]
+    fn pause_stops_at_the_deadline() {
+        let now = Instant::now();
+        let ms = Duration::from_millis;
+        assert_eq!(pause(now, now + ms(120)), Some(RETRY));
+        assert_eq!(pause(now, now + ms(20)), Some(ms(20)));
+        assert_eq!(pause(now, now), None);
+        assert_eq!(pause(now + ms(1), now), None);
     }
 
     #[test]
