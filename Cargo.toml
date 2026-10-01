@@ -8,7 +8,6 @@ publish = false
 
 [dependencies]
 clap = { version = "4", features = ["derive"] }
-fs4 = "1"
 jiff = { version = "0.2", features = ["serde"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["preserve_order"] }
