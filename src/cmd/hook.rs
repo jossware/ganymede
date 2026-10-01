@@ -251,7 +251,7 @@ fn fail(
         None => Alert::Yes(format!(
             "ganymede: couldn't archive this session ({}: {}).",
             stage.as_str(),
-            errlog::one_line(&error),
+            errlog::brief(&error),
         )),
     };
     if let Alert::Yes(text) = alert {
@@ -365,6 +365,27 @@ mod tests {
             String::from_utf8(err).unwrap(),
             "ganymede: payload: HOME is not set\n"
         );
+    }
+
+    #[test]
+    fn clips_a_long_error_without_a_state_dir() {
+        let env = Env {
+            home: None,
+            state: None,
+        };
+        let (mut out, mut err) = (Vec::new(), Vec::new());
+        let error = "word ".repeat(500);
+        fail(
+            &env,
+            &Context::default(),
+            Stage::Parse,
+            error,
+            &mut out,
+            &mut err,
+        );
+        let alert: serde_json::Value = serde_json::from_slice(&out).unwrap();
+        let text = alert["systemMessage"].as_str().unwrap();
+        assert!(text.len() < 400, "{} bytes", text.len());
     }
 
     #[test]

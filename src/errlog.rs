@@ -1,5 +1,6 @@
 //! The error log, and whether a failure earns an alert.
 
+use std::borrow::Cow;
 use std::fmt;
 use std::fs::{self, OpenOptions};
 use std::io::{self, Write};
@@ -13,6 +14,9 @@ use serde::{Deserialize, Serialize};
 use crate::lock;
 
 const MAX_LEN: usize = 1024 * 1024;
+const MAX_ERROR: usize = 8 * 1024;
+const TRUNCATED: &str = " …(truncated)";
+const MAX_BRIEF: usize = 200;
 /// Entries carry session ids and transcript paths.
 const LOG_MODE: u32 = 0o600;
 
@@ -138,7 +142,7 @@ fn record_within(
         Ok(false) => Alert::Yes(format!(
             "ganymede: couldn't archive this session ({}: {}). Details: {}",
             entry.stage.as_str(),
-            one_line(&entry.error),
+            brief(&entry.error),
             tilde(log, home),
         )),
         Err(failure) => {
@@ -154,8 +158,8 @@ fn record_within(
             Alert::Yes(format!(
                 "ganymede: couldn't archive this session ({}: {}). The error log also failed ({}).",
                 entry.stage.as_str(),
-                one_line(&entry.error),
-                one_line(&failure.to_string()),
+                brief(&entry.error),
+                brief(&failure.to_string()),
             ))
         }
     }
@@ -173,11 +177,12 @@ fn check_seen_and_append(
     let seen = key(entry).is_some_and(|k| {
         parse(&text).any(|e| e.stage == entry.stage && key(&e).as_ref() == Some(&k))
     });
-    if text.len() > max_len {
-        text = rotate(log, &text)?;
+    let mut line = to_line(entry).map_err(|e| io_at(log)(e.into()))?;
+    let torn = text.last().is_some_and(|&b| b != b'\n');
+    let needed = line.len() + usize::from(torn);
+    if text.len() + needed > max_len {
+        text = rotate(log, &text, max_len.saturating_sub(needed))?;
     }
-    let mut line = serde_json::to_vec(entry).map_err(|e| io_at(log)(e.into()))?;
-    line.push(b'\n');
     if text.last().is_some_and(|&b| b != b'\n') {
         line.insert(0, b'\n');
     }
@@ -191,11 +196,27 @@ fn check_seen_and_append(
     Ok(seen)
 }
 
-/// Keeps the lines after the midpoint and returns them.
-fn rotate(log: &Path, text: &[u8]) -> Result<Vec<u8>, Failure> {
-    let mid = text.len() / 2;
-    let kept = match text[mid..].iter().position(|&b| b == b'\n') {
-        Some(i) => text[mid + i + 1..].to_vec(),
+/// Serializes `entry` with a trailing newline, clipping its error so one
+/// entry cannot crowd the rest out of the log.
+fn to_line(entry: &Entry) -> serde_json::Result<Vec<u8>> {
+    let mut line = match clip(&entry.error, MAX_ERROR) {
+        Cow::Borrowed(_) => serde_json::to_vec(entry)?,
+        Cow::Owned(error) => serde_json::to_vec(&Entry {
+            error,
+            ..entry.clone()
+        })?,
+    };
+    line.push(b'\n');
+    Ok(line)
+}
+
+/// Keeps the newest whole lines that fit in `room`, at most the newer
+/// half, and returns them.
+fn rotate(log: &Path, text: &[u8], room: usize) -> Result<Vec<u8>, Failure> {
+    let cut = (text.len() / 2).max(text.len().saturating_sub(room));
+    let from = cut.saturating_sub(1);
+    let kept = match text[from..].iter().position(|&b| b == b'\n') {
+        Some(i) => text[from + i + 1..].to_vec(),
         None => Vec::new(),
     };
     let dir = log.parent().unwrap_or(Path::new("."));
@@ -226,6 +247,19 @@ fn read(log: &Path) -> io::Result<Vec<u8>> {
 fn parse(text: &[u8]) -> impl Iterator<Item = Entry> + '_ {
     text.split(|&b| b == b'\n')
         .filter_map(|line| serde_json::from_slice(line).ok())
+}
+
+/// At most `max` bytes of `s`, cut on a char boundary and marked.
+fn clip(s: &str, max: usize) -> Cow<'_, str> {
+    if s.len() <= max {
+        return Cow::Borrowed(s);
+    }
+    Cow::Owned(format!("{}{TRUNCATED}", &s[..s.floor_char_boundary(max)]))
+}
+
+/// An error as one short line, to fit in an alert.
+pub(crate) fn brief(s: &str) -> String {
+    clip(&one_line(s), MAX_BRIEF).into_owned()
 }
 
 pub(crate) fn one_line(s: &str) -> String {
@@ -521,6 +555,50 @@ mod tests {
         );
     }
 
+    fn long_error() -> Entry {
+        Entry {
+            error: "é word\n".repeat(MAX_BRIEF),
+            ..entry(Stage::Parse, None, None)
+        }
+    }
+
+    fn assert_brief(alert: &Alert) {
+        let Alert::Yes(text) = alert else {
+            panic!("{alert:?}")
+        };
+        let brief = text
+            .split_once("(parse: ")
+            .and_then(|(_, rest)| rest.split_once(TRUNCATED))
+            .expect(text)
+            .0;
+        assert!(
+            brief.len() <= MAX_BRIEF && brief.len() > MAX_BRIEF - 2,
+            "{text}"
+        );
+        assert!(one_line(&long_error().error).starts_with(brief));
+    }
+
+    #[test]
+    fn alert_clips_a_long_error() {
+        assert_brief(&Env::new().record(&long_error()));
+    }
+
+    #[test]
+    fn fallback_alert_clips_a_long_error() {
+        let env = Env::new();
+        let _held = lock::acquire(&env.log().with_file_name("errors.lock"), lock::FREE).unwrap();
+        let alert = record_within(
+            &env.log(),
+            Path::new(HOME),
+            &long_error(),
+            MAX_LEN,
+            Duration::ZERO,
+            &mut io::sink(),
+        );
+        assert!(is_fallback(&alert), "{alert:?}");
+        assert_brief(&alert);
+    }
+
     #[test]
     fn tilde_matches_whole_components() {
         let home = Path::new("/Users/ryan");
@@ -602,6 +680,126 @@ mod tests {
         let lines = env.lines();
         assert_eq!(lines.len(), 1);
         assert!(lines[0].contains("\"s\""));
+    }
+
+    #[test]
+    fn append_that_would_cross_the_cap_rotates_first() {
+        let env = Env::new();
+        for s in ["a", "b", "c", "d"] {
+            let _ = env.record(&entry(Stage::Parse, Some(s), None));
+        }
+        let len = fs::metadata(env.log()).unwrap().len() as usize;
+        let e = entry(Stage::Parse, Some("e"), None);
+        let max_len = len + line(&e).len() - 1;
+        let _ = record_small(&env, &e, max_len);
+        assert!(!env.lines()[0].contains("\"a\""), "did not rotate");
+        assert!(fs::metadata(env.log()).unwrap().len() as usize <= max_len);
+    }
+
+    #[test]
+    fn rotation_cut_on_a_line_start_keeps_that_line() {
+        let env = Env::new();
+        let ts: Timestamp = "2026-10-01T00:00:00Z".parse().unwrap();
+        let text: String = ["a", "b", "c", "d"]
+            .map(|s| {
+                line(&Entry {
+                    ts,
+                    ..entry(Stage::Parse, Some(s), None)
+                })
+            })
+            .concat();
+        seed(&env, &text);
+        let e = entry(Stage::Parse, Some("e"), None);
+        let _ = record_small(&env, &e, text.len() / 2 + line(&e).len());
+        let sessions: Vec<String> = recent(&env.log(), 20)
+            .unwrap()
+            .into_iter()
+            .map(|e| e.session.unwrap())
+            .collect();
+        assert_eq!(sessions, ["e", "d", "c"]);
+    }
+
+    #[test]
+    fn large_entry_rotates_away_more_than_half() {
+        let env = Env::new();
+        let text: String = (0..10)
+            .map(|i| line(&entry(Stage::Parse, Some(&i.to_string()), None)))
+            .collect();
+        seed(&env, &text);
+        let e = Entry {
+            error: "x".repeat(text.len() * 3 / 4),
+            ..entry(Stage::Parse, Some("big"), None)
+        };
+        let _ = record_small(&env, &e, text.len());
+        let len = fs::metadata(env.log()).unwrap().len() as usize;
+        assert!(len <= text.len(), "{len}");
+        assert!(env.lines().last().unwrap().contains("\"big\""));
+    }
+
+    #[test]
+    fn torn_line_counts_toward_the_cap() {
+        let env = Env::new();
+        let text: String = ["a", "b", "c", "d"]
+            .map(|s| line(&entry(Stage::Parse, Some(s), None)))
+            .concat();
+        let text = format!("{text}{{\"ts\":\"20");
+        seed(&env, &text);
+        let e = entry(Stage::Parse, Some("e"), None);
+        let max_len = text.len() + line(&e).len();
+        let _ = record_small(&env, &e, max_len);
+        let len = fs::metadata(env.log()).unwrap().len() as usize;
+        assert!(len <= max_len, "{len}");
+    }
+
+    #[test]
+    fn entry_longer_than_the_cap_is_written_alone() {
+        let env = Env::new();
+        seed(&env, "{}\n");
+        let _ = record_small(&env, &entry(Stage::Parse, Some("b"), None), 50);
+        let lines = env.lines();
+        assert_eq!(lines.len(), 1);
+        assert!(lines[0].contains("\"b\""));
+    }
+
+    #[test]
+    fn log_stays_within_the_cap() {
+        let env = Env::new();
+        let max_len = 4 * MAX_ERROR;
+        for i in 0..40 {
+            let e = Entry {
+                error: "x".repeat(i * MAX_ERROR / 10),
+                ..entry(Stage::Parse, Some(&i.to_string()), None)
+            };
+            let _ = record_small(&env, &e, max_len);
+            let len = fs::metadata(env.log()).unwrap().len() as usize;
+            assert!(len <= max_len, "entry {i}: {len}");
+        }
+    }
+
+    #[test]
+    fn long_error_is_truncated_on_a_char_boundary() {
+        let env = Env::new();
+        let error = "é".repeat(MAX_ERROR);
+        let e = Entry {
+            error: error.clone(),
+            ..entry(Stage::Parse, Some("s"), None)
+        };
+        let _ = env.record(&e);
+        let got = &recent(&env.log(), 1).unwrap()[0].error;
+        let kept = got.strip_suffix(TRUNCATED).expect(got);
+        assert!(kept.len() <= MAX_ERROR && kept.len() > MAX_ERROR - 2);
+        assert!(error.starts_with(kept));
+    }
+
+    #[test]
+    fn short_error_is_kept_whole() {
+        let env = Env::new();
+        let e = Entry {
+            error: "x".repeat(MAX_ERROR),
+            ..entry(Stage::Parse, Some("s"), None)
+        };
+        let _ = env.record(&e);
+        assert_eq!(recent(&env.log(), 1).unwrap(), [e]);
     }
 
     // --- fallback ---
