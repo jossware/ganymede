@@ -1,3 +1,6 @@
+// Unused until the CLI saves sessions.
+#[allow(dead_code)]
+mod archive;
 mod cli;
 // Unused until the renderer and archive consume the model.
 #[allow(dead_code)]
