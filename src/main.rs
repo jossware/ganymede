@@ -5,6 +5,9 @@ mod cli;
 // Unused until the CLI loads transcripts.
 #[allow(dead_code)]
 mod harness;
+// Unused until the CLI takes locks.
+#[allow(dead_code)]
+mod lock;
 mod project;
 mod render;
 #[allow(dead_code)]

@@ -1,16 +1,16 @@
 //! Where a session's note lives, and writing it there.
 
 use std::fmt;
-use std::fs::{self, File, OpenOptions, Permissions};
+use std::fs::{self, File, Permissions};
 use std::io::{self, BufRead, BufReader, Write};
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
-use std::thread;
-use std::time::{Duration, Instant, SystemTime};
+use std::time::{Duration, SystemTime};
 
 use jiff::Timestamp;
 use jiff::tz::TimeZone;
 
+use crate::lock;
 use crate::project;
 use crate::render;
 use crate::session::Session;
@@ -20,8 +20,6 @@ const MAX_FRONTMATTER_LINES: usize = 64;
 const TEMP_PREFIX: &str = ".ganymede-";
 const TEMP_SUFFIX: &str = ".tmp";
 const NEW_NOTE_MODE: u32 = 0o644;
-pub const LOCK_TIMEOUT: Duration = Duration::from_secs(10);
-const LOCK_RETRY: Duration = Duration::from_millis(50);
 
 #[derive(Debug)]
 pub enum Error {
@@ -313,34 +311,19 @@ fn single_quoted(body: &str) -> Option<String> {
 #[derive(Debug)]
 #[must_use = "dropping it releases the lock"]
 pub struct Lock {
-    _file: File,
+    _inner: lock::Lock,
 }
 
-/// Waits up to `LOCK_TIMEOUT` for the lock at `path`.
+/// Waits up to `lock::TIMEOUT` for the lock at `path`.
 pub fn lock(path: &Path) -> Result<Lock, Error> {
-    lock_within(path, LOCK_TIMEOUT)
+    lock_within(path, lock::TIMEOUT)
 }
 
 fn lock_within(path: &Path, timeout: Duration) -> Result<Lock, Error> {
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent).map_err(io_at(parent))?;
-    }
-    let file = OpenOptions::new()
-        .create(true)
-        .write(true)
-        .truncate(false)
-        .open(path)
-        .map_err(io_at(path))?;
-    let deadline = Instant::now() + timeout;
-    loop {
-        match fs4::FileExt::try_lock(&file) {
-            Ok(()) => return Ok(Lock { _file: file }),
-            Err(fs4::TryLockError::WouldBlock) if Instant::now() < deadline => {
-                thread::sleep(LOCK_RETRY);
-            }
-            Err(fs4::TryLockError::WouldBlock) => return Err(Error::Locked),
-            Err(fs4::TryLockError::Error(e)) => return Err(io_at(path)(e)),
-        }
+    match lock::acquire(path, timeout) {
+        Ok(inner) => Ok(Lock { _inner: inner }),
+        Err(lock::Error::Locked) => Err(Error::Locked),
+        Err(lock::Error::Io { path, source }) => Err(Error::Io { path, source }),
     }
 }
 
@@ -394,6 +377,7 @@ fn sweep(dir: &Path) {
 mod tests {
     use std::fs::FileTimes;
     use std::slice;
+    use std::time::Instant;
 
     use jiff::tz::Offset;
     use tempfile::TempDir;
