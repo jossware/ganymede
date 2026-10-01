@@ -18,8 +18,6 @@ pub const IGNORED_RECORDS: &[&str] = &[
     "mode",
     "permission-mode",
     "progress",
-    "ai-title",
-    "custom-title",
     "bridge-session",
     "atis-latch",
     "pr-link",
@@ -35,6 +33,13 @@ pub const IGNORED_RECORDS: &[&str] = &[
 const SYNTHETIC_MODEL: &str = "<synthetic>";
 
 const COMPACTION: &str = "compaction";
+
+/// What Claude Code writes as a user turn when the user stops a reply. A
+/// transcript resumed after one can open with it.
+const INTERRUPTIONS: &[&str] = &[
+    "[Request interrupted by user]",
+    "[Request interrupted by user for tool use]",
+];
 
 /// Tags Claude Code injects into user messages; the user never typed them.
 /// `bash-notification` is the pre-2.1 background shell notice.
@@ -119,12 +124,22 @@ pub fn parse(records: &Records, session: &mut Session) -> Result<(), LoadError> 
             "user" if flag(record, "isMeta") => {}
             "user" => walk.user(record, session),
             "assistant" => walk.assistant(record, session),
+            // The latest record of each kind wins: a rename or a regenerated
+            // title rewrites it mid-session.
+            "custom-title" => {
+                walk.custom_title = non_blank(record, "customTitle").map(String::from)
+            }
+            "ai-title" => walk.ai_title = non_blank(record, "aiTitle").map(String::from),
             t if IGNORED_RECORDS.contains(&t) => {}
             t => session.record_unhandled(&format!("record/{t}"), 1),
         }
     }
     if !session_id_seen {
         return Err(LoadError::Parse("missing sessionId".into()));
+    }
+    // A title the user set, then Claude Code's own, beat the derived one.
+    if let Some(title) = walk.custom_title.or(walk.ai_title) {
+        session.title_source = Some(title);
     }
     // A sidechain-only file has no non-sidechain record to carry it.
     if session.id.is_empty()
@@ -188,6 +203,8 @@ struct Walk {
     pending: HashMap<String, usize>,
     /// Name and summary for the next command-output record.
     last_command: Option<(String, String)>,
+    custom_title: Option<String>,
+    ai_title: Option<String>,
 }
 
 impl Walk {
@@ -368,9 +385,10 @@ impl Walk {
 }
 
 /// The first user turn titles the session by `title`, falling back to the
-/// entry's text so a placeholder-only opener still has a source.
+/// entry's text so a placeholder-only opener still has a source. An
+/// interruption marker is not something the user typed, so it never titles.
 fn push_user(session: &mut Session, at: Option<Timestamp>, text: String, title: &str) {
-    if session.title_source.is_none() {
+    if session.title_source.is_none() && !INTERRUPTIONS.contains(&title.trim()) {
         session.title_source = Some(if title.is_empty() {
             text.clone()
         } else {
@@ -1199,11 +1217,11 @@ mod tests {
     }
 
     #[test]
-    fn title_source_is_first_user_text() {
+    fn ai_title_beats_first_user_text() {
         let s = session("basic.jsonl");
         assert_eq!(
             s.title_source.as_deref(),
-            Some("Add a greeting to the sample CLI")
+            Some("Add greeting to sample CLI")
         );
     }
 
@@ -1254,6 +1272,75 @@ mod tests {
         ]))]);
         assert_eq!(lines(&s), ["user: a\n\n[image]\n\nb"]);
         assert_eq!(s.title_source.as_deref(), Some("a\n\nb"));
+    }
+
+    #[test]
+    fn interruption_opener_does_not_title() {
+        for marker in [
+            "[Request interrupted by user]",
+            "[Request interrupted by user for tool use]",
+        ] {
+            let s = parse_all(&[
+                user(json!([text(marker)])),
+                user(json!("Implement the plan")),
+            ]);
+            assert_eq!(
+                lines(&s),
+                [format!("user: {marker}"), "user: Implement the plan".into()]
+            );
+            assert_eq!(
+                s.title_source.as_deref(),
+                Some("Implement the plan"),
+                "{marker}"
+            );
+        }
+        let s = parse_all(&[user(json!("[Request interrupted by user]"))]);
+        assert!(!s.is_empty());
+        assert_eq!(s.title_source, None);
+        let s = parse_all(&[user(json!("[Request interrupted by user] then do this"))]);
+        assert_eq!(
+            s.title_source.as_deref(),
+            Some("[Request interrupted by user] then do this")
+        );
+    }
+
+    #[test]
+    fn harness_titles_beat_the_derived_title() {
+        let custom =
+            |t: &str| json!({"type": "custom-title", "customTitle": t, "sessionId": "sess-1"});
+        let ai = |t: &str| json!({"type": "ai-title", "aiTitle": t, "sessionId": "sess-1"});
+        for (titles, want) in [
+            (vec![], "opener"),
+            (vec![ai("Fix the parser")], "Fix the parser"),
+            (vec![ai("first"), ai("second")], "second"),
+            (vec![custom("mine"), ai("Fix the parser")], "mine"),
+            (vec![ai("Fix the parser"), custom("mine")], "mine"),
+            (vec![custom("old-name"), custom("new-name")], "new-name"),
+            // A blank record clears its kind.
+            (
+                vec![ai("Fix the parser"), custom("mine"), custom(" ")],
+                "Fix the parser",
+            ),
+            (
+                vec![
+                    ai("Fix the parser"),
+                    json!({"type": "ai-title", "sessionId": "sess-1"}),
+                ],
+                "opener",
+            ),
+        ] {
+            let mut records = vec![user(json!("opener"))];
+            records.extend(titles.clone());
+            let s = parse_all(&records);
+            assert_eq!(s.title_source.as_deref(), Some(want), "{titles:?}");
+            assert_eq!(lines(&s), ["user: opener"], "{titles:?}");
+            assert!(s.unhandled.is_empty(), "{titles:?}");
+        }
+        // A title record before the first user turn still wins.
+        let s = parse_all(&[ai("Fix the parser"), user(json!("opener"))]);
+        assert_eq!(s.title_source.as_deref(), Some("Fix the parser"));
+        // Without a user turn there is still no note.
+        assert!(parse_all(&[ai("Fix the parser")]).is_empty());
     }
 
     #[test]

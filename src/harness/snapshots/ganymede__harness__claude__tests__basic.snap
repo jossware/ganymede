@@ -19,7 +19,7 @@ Session {
         2026-09-04T02:25:00Z,
     ),
     title_source: Some(
-        "Add a greeting to the sample CLI",
+        "Add greeting to sample CLI",
     ),
     cc_version: Some(
         "v2.1.259",
