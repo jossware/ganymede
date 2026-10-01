@@ -288,6 +288,7 @@ fn single_quoted(body: &str) -> Option<String> {
 /// transcript: a session loaded outside the lock can still be saved after
 /// a newer one, and its stale render would win.
 #[derive(Debug)]
+#[must_use = "dropping it releases the lock"]
 pub struct Lock {
     _file: File,
 }
@@ -309,7 +310,6 @@ fn lock_within(path: &Path, timeout: Duration) -> Result<Lock, Error> {
         .map_err(io_at(path))?;
     let deadline = Instant::now() + timeout;
     loop {
-        // Called by path: std's inherent File::try_lock would shadow it.
         match fs4::FileExt::try_lock(&file) {
             Ok(()) => return Ok(Lock { _file: file }),
             Err(fs4::TryLockError::WouldBlock) if Instant::now() < deadline => {
@@ -689,7 +689,7 @@ mod tests {
     fn lock_creates_its_folder() {
         let tmp = tempfile::tempdir().unwrap();
         let path = tmp.path().join("state/ganymede/archive.lock");
-        lock_within(&path, Duration::ZERO).unwrap();
+        let _lock = lock_within(&path, Duration::ZERO).unwrap();
         assert!(path.is_file());
     }
 
@@ -705,7 +705,7 @@ mod tests {
         ));
         assert!(start.elapsed() >= Duration::from_millis(120));
         drop(held);
-        lock_within(&path, Duration::ZERO).unwrap();
+        let _lock = lock_within(&path, Duration::ZERO).unwrap();
     }
 
     #[test]
@@ -718,7 +718,7 @@ mod tests {
             Err(Error::Locked)
         ));
         drop(first);
-        lock_within(&path, Duration::ZERO).unwrap();
+        let _lock = lock_within(&path, Duration::ZERO).unwrap();
     }
 
     #[test]
