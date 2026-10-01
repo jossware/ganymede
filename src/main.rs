@@ -1,14 +1,14 @@
+// Unused until the CLI saves sessions.
+#[allow(dead_code)]
+mod archive;
 mod cli;
-// Unused until the renderer and archive consume the model.
+// Unused until the CLI loads transcripts.
 #[allow(dead_code)]
 mod harness;
-#[allow(dead_code)]
 mod project;
-#[allow(dead_code)]
 mod render;
 #[allow(dead_code)]
 mod session;
-#[allow(dead_code)]
 mod title;
 
 use std::process::ExitCode;
