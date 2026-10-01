@@ -364,6 +364,15 @@ mod tests {
     }
 
     #[test]
+    fn recent_reads_an_omitted_optional_key_as_none() {
+        let env = Env::new();
+        let e = entry(Stage::Parse, Some("s"), None);
+        seed(&env, &line(&e).replace("\"harness\":null,", ""));
+        assert!(!fs::read_to_string(env.log()).unwrap().contains("harness"));
+        assert_eq!(recent(&env.log(), 20).unwrap(), [e]);
+    }
+
+    #[test]
     fn recent_of_a_missing_log_is_empty() {
         let env = Env::new();
         assert!(recent(&env.log(), 20).unwrap().is_empty());
