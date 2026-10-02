@@ -158,7 +158,7 @@ r.agent('Capturing every page.')
 r.end_turn('Capturing every page.')
 r.write('edges.jsonl')
 
-# Non-interactive sessions the filter skips.
+# Sessions that differ only in session_meta; the interactivity tests use them.
 def minimal(name, sid, **meta):
     r = R(sid, REPO, **meta)
     r.start_turn()
@@ -173,6 +173,8 @@ minimal('subagent_guardian.jsonl', '01a0b000-0000-7000-8000-000000000012', sourc
 minimal('subagent_thread_spawn.jsonl', '01a0b000-0000-7000-8000-000000000013', source={'subagent': {'thread_spawn': {'parent_thread_id': '01a0b000-0000-7000-8000-000000000001', 'depth': 1, 'agent_path': '/root/spec_review', 'agent_nickname': 'Ohm', 'agent_role': None}}}, thread_source=None, originator='codex-tui')
 minimal('quick_chat.jsonl', '01a0b000-0000-7000-8000-000000000014', source='vscode', thread_source='avatar_quick_chat', originator='Codex Desktop')
 minimal('handoff.jsonl', '01a0b000-0000-7000-8000-000000000015', source='vscode', thread_source='chatgpt_handoff', originator='codex_work_desktop')
+minimal('automation.jsonl', '01a0b000-0000-7000-8000-000000000017', source='vscode', thread_source='automation', originator='Codex Desktop')
+minimal('voice_chat.jsonl', '01a0b000-0000-7000-8000-000000000018', source='vscode', thread_source='voice_chat', originator='Codex Desktop')
 minimal('legacy_interactive.jsonl', '01a0b000-0000-7000-8000-000000000016', source='cli', thread_source=None, originator='codex_cli_rs', version='0.88.0')
 
 # legacy: codex_cli_rs rollout without item_completed.

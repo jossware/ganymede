@@ -55,6 +55,11 @@ const REPLY_CLOSE: &str = "</send_user_message_question_reply>";
 
 const INTERACTIVE_SOURCES: &[&str] = &["cli", "vscode"];
 
+/// Threads with no conversation worth a note. A denylist, so a thread
+/// source Codex adds later is archived rather than dropped unseen.
+const SKIPPED_THREAD_SOURCES: &[&str] =
+    &["automation", "voice_chat", "subagent", "guardian_review"];
+
 /// Why a rollout is not an interactive session, or `None` to archive it.
 pub fn skip_reason(records: &Records) -> Option<String> {
     // Without session_meta there is nothing to judge; parse reports the error.
@@ -66,11 +71,11 @@ pub fn skip_reason(records: &Records) -> Option<String> {
     {
         return Some(non_interactive("source", source));
     }
-    match at(meta, "thread_source") {
-        None | Some(Value::Null) => None,
-        Some(Value::String(s)) if s == "user" => None,
-        Some(other) => Some(non_interactive("thread_source", other)),
-    }
+    let thread_source = at(meta, "thread_source").unwrap_or(&Value::Null);
+    thread_source
+        .as_str()
+        .is_some_and(|s| SKIPPED_THREAD_SOURCES.contains(&s))
+        .then(|| non_interactive("thread_source", thread_source))
 }
 
 fn non_interactive(field: &str, value: &Value) -> String {
@@ -560,6 +565,8 @@ mod tests {
         for name in [
             "tui.jsonl",
             "desktop_chat.jsonl",
+            "quick_chat.jsonl",
+            "handoff.jsonl",
             "legacy_interactive.jsonl",
         ] {
             assert_eq!(skip_reason(&fixture(name)), None, "{name}");
@@ -573,13 +580,46 @@ mod tests {
             ("subagent_review.jsonl", "source: subagent"),
             ("subagent_guardian.jsonl", "source: subagent"),
             ("subagent_thread_spawn.jsonl", "source: subagent"),
-            ("quick_chat.jsonl", "thread_source: avatar_quick_chat"),
-            ("handoff.jsonl", "thread_source: chatgpt_handoff"),
+            ("automation.jsonl", "thread_source: automation"),
+            ("voice_chat.jsonl", "thread_source: voice_chat"),
         ] {
             assert_eq!(
                 skip_reason(&fixture(name)),
                 Some(format!("non-interactive codex session ({why})")),
                 "{name}"
+            );
+        }
+    }
+
+    #[test]
+    fn unknown_thread_source_is_kept() {
+        let r = Records::parse(
+            r#"{"type":"session_meta","payload":{"source":"vscode","thread_source":"hologram_chat"}}"#,
+        );
+        assert_eq!(skip_reason(&r), None);
+    }
+
+    #[test]
+    fn odd_thread_sources_are_kept() {
+        for value in ["null", r#"{"hologram":{}}"#, "7"] {
+            let r = Records::parse(&format!(
+                r#"{{"type":"session_meta","payload":{{"source":"cli","thread_source":{value}}}}}"#
+            ));
+            assert_eq!(skip_reason(&r), None, "{value}");
+        }
+    }
+
+    #[test]
+    fn subagent_thread_sources_are_skipped() {
+        for value in ["subagent", "guardian_review"] {
+            let r = Records::parse(&format!(
+                r#"{{"type":"session_meta","payload":{{"source":"vscode","thread_source":"{value}"}}}}"#
+            ));
+            assert_eq!(
+                skip_reason(&r),
+                Some(format!(
+                    "non-interactive codex session (thread_source: {value})"
+                ))
             );
         }
     }
