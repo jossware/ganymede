@@ -60,7 +60,11 @@ fn publish(ctx: &Context) {
 /// The payload's fields, and its transcript or why it is unusable. The
 /// fields are filled even from an unusable payload, so the failure still
 /// dedupes by session.
-fn read_payload(input: &[u8]) -> (Context, Result<PathBuf, String>) {
+///
+/// A null `transcript_path` means the session has no transcript: Codex
+/// sends one for a thread it never persisted. That is nothing to archive,
+/// not a failure.
+fn read_payload(input: &[u8]) -> (Context, Result<Option<PathBuf>, String>) {
     let value = serde_json::from_slice::<Value>(input);
     let object = value.as_ref().ok().and_then(Value::as_object);
     let text = |key: &str| {
@@ -80,8 +84,9 @@ fn read_payload(input: &[u8]) -> (Context, Result<PathBuf, String>) {
     let transcript = match (&value, object, text("transcript_path")) {
         (Err(e), _, _) => Err(format!("payload is not JSON: {e}")),
         (Ok(_), None, _) => Err("payload is not a JSON object".to_string()),
+        (Ok(_), Some(_), Some(t)) => Ok(Some(PathBuf::from(t))),
+        (Ok(_), Some(o), None) if o.get("transcript_path") == Some(&Value::Null) => Ok(None),
         (Ok(_), Some(_), None) => Err("payload has no transcript_path".to_string()),
-        (Ok(_), Some(_), Some(t)) => Ok(PathBuf::from(t)),
     };
     (ctx, transcript)
 }
@@ -116,7 +121,8 @@ pub fn run(
             );
         }
         (Ok(_), Err(e)) => return fail(env, &ctx, Stage::Payload, e, out, err),
-        (Ok(_), Ok(transcript)) => transcript,
+        (Ok(_), Ok(None)) => return,
+        (Ok(_), Ok(Some(transcript))) => transcript,
     };
     let (Some(home), Some(state)) = (&env.home, &env.state) else {
         return fail(
@@ -294,7 +300,16 @@ mod tests {
             br#"{"session_id":"s1","transcript_path":"/t.jsonl","hook_event_name":"Stop","cwd":"/x"}"#,
         );
         assert_eq!(ctx, context("s1", "/t.jsonl"));
-        assert_eq!(transcript, Ok(PathBuf::from("/t.jsonl")));
+        assert_eq!(transcript, Ok(Some(PathBuf::from("/t.jsonl"))));
+    }
+
+    #[test]
+    fn null_transcript_path_is_no_transcript() {
+        let (ctx, transcript) = read_payload(
+            br#"{"session_id":"s1","transcript_path":null,"hook_event_name":"SessionEnd"}"#,
+        );
+        assert_eq!(ctx.session.as_deref(), Some("s1"));
+        assert_eq!(transcript, Ok(None));
     }
 
     #[test]
@@ -332,7 +347,7 @@ mod tests {
             let len = field.as_ref().unwrap().len();
             assert!(len < 2 * MAX_FIELD, "{len} bytes");
         }
-        assert_eq!(transcript.unwrap().as_os_str().len(), huge.len());
+        assert_eq!(transcript.unwrap().unwrap().as_os_str().len(), huge.len());
     }
 
     #[test]
@@ -438,6 +453,22 @@ mod tests {
         let entries = errlog::recent(&log, 10).unwrap();
         assert_eq!(entries.len(), 2);
         assert_eq!(entries[0].session.as_deref(), Some("s1"));
+    }
+
+    #[test]
+    fn run_ignores_a_session_without_a_transcript() {
+        let tmp = tempfile::tempdir().unwrap();
+        let env = Env {
+            home: Some(tmp.path().to_path_buf()),
+            state: Some(tmp.path().join("state")),
+        };
+        let payload =
+            r#"{"session_id":"s1","transcript_path":null,"hook_event_name":"SessionEnd"}"#;
+        let opts = hook_opts(&["--dir", &tmp.path().display().to_string()]);
+        let (mut out, mut err) = (Vec::new(), Vec::new());
+        run(&opts, &env, &mut payload.as_bytes(), &mut out, &mut err);
+        assert!(out.is_empty() && err.is_empty());
+        assert!(!paths::error_log(env.state.as_ref().unwrap()).exists());
     }
 
     #[test]
