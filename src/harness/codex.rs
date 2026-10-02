@@ -52,8 +52,20 @@ const BROWSER_OPEN: &str = "<in-app-browser-context";
 const BROWSER_CLOSE: &str = "</in-app-browser-context>";
 const REPLY_OPEN: &str = "<send_user_message_question_reply>";
 const REPLY_CLOSE: &str = "</send_user_message_question_reply>";
+const HANDOFF_OPEN: &str = "Continuing from [";
+const HANDOFF_LINK: &str = "](chatgpt-conversation://";
 
 const INTERACTIVE_SOURCES: &[&str] = &["cli", "vscode"];
+
+/// Threads with no conversation worth a note. A denylist, so a thread
+/// source Codex adds later is archived rather than dropped unseen.
+const SKIPPED_THREAD_SOURCES: &[&str] = &[
+    "automation",
+    "voice_chat",
+    "subagent",
+    "guardian_review",
+    "codex_web_code_review",
+];
 
 /// Why a rollout is not an interactive session, or `None` to archive it.
 pub fn skip_reason(records: &Records) -> Option<String> {
@@ -64,22 +76,23 @@ pub fn skip_reason(records: &Records) -> Option<String> {
         .as_str()
         .is_some_and(|s| INTERACTIVE_SOURCES.contains(&s))
     {
-        return Some(non_interactive("source", source));
+        return Some(non_interactive("source", &source_name(source)));
     }
-    match at(meta, "thread_source") {
-        None | Some(Value::Null) => None,
-        Some(Value::String(s)) if s == "user" => None,
-        Some(other) => Some(non_interactive("thread_source", other)),
-    }
+    str_at(meta, "thread_source")
+        .filter(|s| SKIPPED_THREAD_SOURCES.contains(s))
+        .map(|s| non_interactive("thread_source", s))
 }
 
-fn non_interactive(field: &str, value: &Value) -> String {
-    let value = match value {
+fn source_name(source: &Value) -> String {
+    match source {
         Value::String(s) => s.clone(),
         // Subagent sources are objects keyed by the subagent kind.
         Value::Object(m) => m.keys().next().cloned().unwrap_or_default(),
         other => other.to_string(),
-    };
+    }
+}
+
+fn non_interactive(field: &str, value: &str) -> String {
     format!("non-interactive codex session ({field}: {value})")
 }
 
@@ -487,8 +500,16 @@ fn strip_browser_context(text: &str) -> String {
     out
 }
 
-/// A `$skill` invocation is titled by its arguments when it has any.
+/// A `$skill` invocation is titled by its arguments when it has any. A
+/// ChatGPT handoff is titled by the conversation's name: the request after
+/// the link is ChatGPT's paraphrase, not the user's words.
 fn title_source(text: &str) -> String {
+    if let Some(rest) = text.strip_prefix(HANDOFF_OPEN)
+        && let Some((name, _)) = rest.split_once(HANDOFF_LINK)
+        && !name.trim().is_empty()
+    {
+        return name.to_string();
+    }
     if let Some(invocation) = text.strip_prefix('$')
         && let Some((skill, args)) = invocation.split_once(char::is_whitespace)
         && !skill.is_empty()
@@ -560,6 +581,8 @@ mod tests {
         for name in [
             "tui.jsonl",
             "desktop_chat.jsonl",
+            "quick_chat.jsonl",
+            "handoff.jsonl",
             "legacy_interactive.jsonl",
         ] {
             assert_eq!(skip_reason(&fixture(name)), None, "{name}");
@@ -573,13 +596,46 @@ mod tests {
             ("subagent_review.jsonl", "source: subagent"),
             ("subagent_guardian.jsonl", "source: subagent"),
             ("subagent_thread_spawn.jsonl", "source: subagent"),
-            ("quick_chat.jsonl", "thread_source: avatar_quick_chat"),
-            ("handoff.jsonl", "thread_source: chatgpt_handoff"),
+            ("automation.jsonl", "thread_source: automation"),
+            ("voice_chat.jsonl", "thread_source: voice_chat"),
         ] {
             assert_eq!(
                 skip_reason(&fixture(name)),
                 Some(format!("non-interactive codex session ({why})")),
                 "{name}"
+            );
+        }
+    }
+
+    #[test]
+    fn unknown_thread_source_is_kept() {
+        let r = Records::parse(
+            r#"{"type":"session_meta","payload":{"source":"vscode","thread_source":"hologram_chat"}}"#,
+        );
+        assert_eq!(skip_reason(&r), None);
+    }
+
+    #[test]
+    fn odd_thread_sources_are_kept() {
+        for value in ["null", r#"{"hologram":{}}"#, "7"] {
+            let r = Records::parse(&format!(
+                r#"{{"type":"session_meta","payload":{{"source":"cli","thread_source":{value}}}}}"#
+            ));
+            assert_eq!(skip_reason(&r), None, "{value}");
+        }
+    }
+
+    #[test]
+    fn background_thread_sources_are_skipped() {
+        for value in ["subagent", "guardian_review", "codex_web_code_review"] {
+            let r = Records::parse(&format!(
+                r#"{{"type":"session_meta","payload":{{"source":"vscode","thread_source":"{value}"}}}}"#
+            ));
+            assert_eq!(
+                skip_reason(&r),
+                Some(format!(
+                    "non-interactive codex session (thread_source: {value})"
+                ))
             );
         }
     }
@@ -690,12 +746,32 @@ mod tests {
     }
 
     #[test]
+    fn chat_threads_file_under_chat() {
+        for name in ["quick_chat.jsonl", "handoff.jsonl"] {
+            let id = crate::project::identify(&session(name).cwds, None, Path::new("/Users/user"));
+            assert_eq!(id.name, "chat", "{name}");
+        }
+    }
+
+    #[test]
+    fn handoff_titles_by_chatgpt_conversation() {
+        assert_eq!(
+            session("handoff.jsonl").title_source.as_deref(),
+            Some("Fix the Build")
+        );
+    }
+
+    #[test]
     fn title_source_rules() {
         assert_eq!(title_source("$code-review check the CSS"), "check the CSS");
         assert_eq!(title_source("$standup"), "$standup");
         assert_eq!(title_source("$standup   "), "$standup   ");
         assert_eq!(title_source("$ spaced"), "$ spaced");
         assert_eq!(title_source("plain text"), "plain text");
+        let empty = "Continuing from [](chatgpt-conversation://x): Check CI";
+        assert_eq!(title_source(empty), empty);
+        let web = "Continuing from [the docs](https://example.com): Check CI";
+        assert_eq!(title_source(web), web);
     }
 
     #[test]
@@ -1196,6 +1272,7 @@ mod tests {
             "desktop_chat.jsonl",
             "skill_only.jsonl",
             "edges.jsonl",
+            "handoff.jsonl",
             "legacy_interactive.jsonl",
         ] {
             assert_eq!(session(name).unhandled, BTreeMap::new(), "{name}");

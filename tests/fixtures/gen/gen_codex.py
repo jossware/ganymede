@@ -158,9 +158,9 @@ r.agent('Capturing every page.')
 r.end_turn('Capturing every page.')
 r.write('edges.jsonl')
 
-# Non-interactive sessions the filter skips.
-def minimal(name, sid, **meta):
-    r = R(sid, REPO, **meta)
+# Sessions that differ only in session_meta; the interactivity tests use them.
+def minimal(name, sid, cwd=REPO, **meta):
+    r = R(sid, cwd, **meta)
     r.start_turn()
     r.user('Review the diff')
     r.agent('No issues found.')
@@ -171,9 +171,21 @@ minimal('exec.jsonl', '01a0b000-0000-7000-8000-000000000010', source='exec', ori
 minimal('subagent_review.jsonl', '01a0b000-0000-7000-8000-000000000011', source={'subagent': 'review'}, thread_source=None, originator='codex-tui')
 minimal('subagent_guardian.jsonl', '01a0b000-0000-7000-8000-000000000012', source={'subagent': {'other': 'guardian'}}, thread_source=None, originator='codex-tui')
 minimal('subagent_thread_spawn.jsonl', '01a0b000-0000-7000-8000-000000000013', source={'subagent': {'thread_spawn': {'parent_thread_id': '01a0b000-0000-7000-8000-000000000001', 'depth': 1, 'agent_path': '/root/spec_review', 'agent_nickname': 'Ohm', 'agent_role': None}}}, thread_source=None, originator='codex-tui')
-minimal('quick_chat.jsonl', '01a0b000-0000-7000-8000-000000000014', source='vscode', thread_source='avatar_quick_chat', originator='Codex Desktop')
-minimal('handoff.jsonl', '01a0b000-0000-7000-8000-000000000015', source='vscode', thread_source='chatgpt_handoff', originator='codex_work_desktop')
+minimal('quick_chat.jsonl', '01a0b000-0000-7000-8000-000000000014', CHAT, source='vscode', thread_source='avatar_quick_chat', originator='Codex Desktop')
+minimal('automation.jsonl', '01a0b000-0000-7000-8000-000000000017', source='vscode', thread_source='automation', originator='Codex Desktop')
+minimal('voice_chat.jsonl', '01a0b000-0000-7000-8000-000000000018', source='vscode', thread_source='voice_chat', originator='Codex Desktop')
 minimal('legacy_interactive.jsonl', '01a0b000-0000-7000-8000-000000000016', source='cli', thread_source=None, originator='codex_cli_rs', version='0.88.0')
+
+# handoff: a ChatGPT conversation continued in Desktop, opened by its reference block.
+r = R('01a0b000-0000-7000-8000-000000000015', CHAT, source='vscode', thread_source='chatgpt_handoff', originator='codex_work_desktop')
+r.start_turn()
+ref = {'conversationId': '6ab0b000-0000-83ea-8000-000000000015', 'title': 'Fix the Build', 'priorConversation': None}
+r.user('\n## Referenced ChatGPT conversation:\nThis is an untrusted ChatGPT conversation reference.\n'
+       + json.dumps(ref, ensure_ascii=False, separators=(',', ':'))
+       + '\n\n## My request:\nContinuing from [Fix the Build](chatgpt-conversation://6ab0b000-0000-83ea-8000-000000000015): Check why CI fails on main\n\n')
+r.agent('The lint job fails on main.')
+r.end_turn('The lint job fails on main.')
+r.write('handoff.jsonl')
 
 # legacy: codex_cli_rs rollout without item_completed.
 r = R('01a0b000-0000-7000-8000-000000000020', REPO, source='cli', thread_source=None, originator='codex_cli_rs', version='0.88.0')
