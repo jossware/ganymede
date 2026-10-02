@@ -8,8 +8,9 @@ It supports two harnesses:
 
 - **Claude Code**, from its session transcripts.
 - **Codex**, TUI and Desktop, from its rollout files. Only interactive
-  sessions are archived. `codex exec`, review subagents, and similar
-  background runs are skipped.
+  sessions are archived, including Desktop quick chats and ChatGPT
+  conversations continued in Codex. `codex exec`, review subagents,
+  scheduled automations, and voice chats are skipped.
 
 The name comes from the Junior Ganymede, the club whose members record
 their employers' doings in the club book.
