@@ -59,8 +59,13 @@ const INTERACTIVE_SOURCES: &[&str] = &["cli", "vscode"];
 
 /// Threads with no conversation worth a note. A denylist, so a thread
 /// source Codex adds later is archived rather than dropped unseen.
-const SKIPPED_THREAD_SOURCES: &[&str] =
-    &["automation", "voice_chat", "subagent", "guardian_review"];
+const SKIPPED_THREAD_SOURCES: &[&str] = &[
+    "automation",
+    "voice_chat",
+    "subagent",
+    "guardian_review",
+    "codex_web_code_review",
+];
 
 /// Why a rollout is not an interactive session, or `None` to archive it.
 pub fn skip_reason(records: &Records) -> Option<String> {
@@ -621,8 +626,8 @@ mod tests {
     }
 
     #[test]
-    fn subagent_thread_sources_are_skipped() {
-        for value in ["subagent", "guardian_review"] {
+    fn background_thread_sources_are_skipped() {
+        for value in ["subagent", "guardian_review", "codex_web_code_review"] {
             let r = Records::parse(&format!(
                 r#"{{"type":"session_meta","payload":{{"source":"vscode","thread_source":"{value}"}}}}"#
             ));
