@@ -741,6 +741,14 @@ mod tests {
     }
 
     #[test]
+    fn chat_threads_file_under_chat() {
+        for name in ["quick_chat.jsonl", "handoff.jsonl"] {
+            let id = crate::project::identify(&session(name).cwds, None, Path::new("/Users/user"));
+            assert_eq!(id.name, "chat", "{name}");
+        }
+    }
+
+    #[test]
     fn handoff_titles_by_chatgpt_conversation() {
         assert_eq!(
             session("handoff.jsonl").title_source.as_deref(),
