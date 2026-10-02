@@ -71,22 +71,23 @@ pub fn skip_reason(records: &Records) -> Option<String> {
         .as_str()
         .is_some_and(|s| INTERACTIVE_SOURCES.contains(&s))
     {
-        return Some(non_interactive("source", source));
+        return Some(non_interactive("source", &source_name(source)));
     }
-    let thread_source = at(meta, "thread_source").unwrap_or(&Value::Null);
-    thread_source
-        .as_str()
-        .is_some_and(|s| SKIPPED_THREAD_SOURCES.contains(&s))
-        .then(|| non_interactive("thread_source", thread_source))
+    str_at(meta, "thread_source")
+        .filter(|s| SKIPPED_THREAD_SOURCES.contains(s))
+        .map(|s| non_interactive("thread_source", s))
 }
 
-fn non_interactive(field: &str, value: &Value) -> String {
-    let value = match value {
+fn source_name(source: &Value) -> String {
+    match source {
         Value::String(s) => s.clone(),
         // Subagent sources are objects keyed by the subagent kind.
         Value::Object(m) => m.keys().next().cloned().unwrap_or_default(),
         other => other.to_string(),
-    };
+    }
+}
+
+fn non_interactive(field: &str, value: &str) -> String {
     format!("non-interactive codex session ({field}: {value})")
 }
 
