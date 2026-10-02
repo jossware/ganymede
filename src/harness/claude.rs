@@ -41,6 +41,49 @@ const INTERRUPTIONS: &[&str] = &[
     "[Request interrupted by user for tool use]",
 ];
 
+/// Built-in commands that change settings or the UI rather than ask for
+/// work. Run without args, one titles the session only when no user turn
+/// does. Prompt commands such as `/init` and `/review` are left out.
+const SETTINGS_COMMANDS: &[&str] = &[
+    "/add-dir",
+    "/agents",
+    "/clear",
+    "/compact",
+    "/config",
+    "/context",
+    "/cost",
+    "/doctor",
+    "/effort",
+    "/exit",
+    "/export",
+    "/extra-usage",
+    "/fast",
+    "/help",
+    "/hooks",
+    "/ide",
+    "/login",
+    "/logout",
+    "/mcp",
+    "/memory",
+    "/model",
+    "/output-style",
+    "/permissions",
+    "/plugin",
+    "/release-notes",
+    "/reload-plugins",
+    "/resume",
+    "/rewind",
+    "/sandbox",
+    "/stats",
+    "/status",
+    "/statusline",
+    "/terminal-setup",
+    "/theme",
+    "/upgrade",
+    "/usage",
+    "/vim",
+];
+
 /// Tags Claude Code injects into user messages; the user never typed them.
 /// `bash-notification` is the pre-2.1 background shell notice.
 const INJECTED_TAGS: &[&str] = &[
@@ -141,6 +184,9 @@ pub fn parse(records: &Records, session: &mut Session) -> Result<(), LoadError> 
     if let Some(title) = walk.custom_title.or(walk.ai_title) {
         session.title_source = Some(title);
     }
+    if session.title_source.is_none() {
+        session.title_source = walk.command_title;
+    }
     // A sidechain-only file has no non-sidechain record to carry it.
     if session.id.is_empty()
         && let Some(id) = sidechain_id
@@ -205,6 +251,8 @@ struct Walk {
     last_command: Option<(String, String)>,
     custom_title: Option<String>,
     ai_title: Option<String>,
+    /// The first arg-less settings command, for a session with nothing else.
+    command_title: Option<String>,
 }
 
 impl Walk {
@@ -261,7 +309,12 @@ impl Walk {
             } else {
                 format!("{name} {args}")
             };
-            push_user(session, ts, line, &args);
+            if args.is_empty() && SETTINGS_COMMANDS.contains(&name.as_str()) {
+                self.command_title.get_or_insert_with(|| name.clone());
+                push_user(session, ts, line, None);
+            } else {
+                push_user(session, ts, line, Some(&args));
+            }
             self.last_command = Some((name, args));
             return;
         }
@@ -269,7 +322,7 @@ impl Walk {
             && let Some(command) = inner(text, "bash-input")
         {
             let command = command.trim().to_string();
-            push_user(session, ts, format!("! {command}"), "");
+            push_user(session, ts, format!("! {command}"), Some(""));
             self.last_command = Some(("!".into(), command));
             return;
         }
@@ -317,7 +370,7 @@ impl Walk {
         }
         let (text, title) = clean_pieces(&rest);
         if !text.is_empty() {
-            push_user(session, ts, text, &title);
+            push_user(session, ts, text, Some(&title));
         }
         // A stray output record after later conversation must not borrow a
         // stale command's name.
@@ -385,10 +438,14 @@ impl Walk {
 }
 
 /// The first user turn titles the session by `title`, falling back to the
-/// entry's text so a placeholder-only opener still has a source. An
-/// interruption marker is not something the user typed, so it never titles.
-fn push_user(session: &mut Session, at: Option<Timestamp>, text: String, title: &str) {
-    if session.title_source.is_none() && !INTERRUPTIONS.contains(&title.trim()) {
+/// entry's text so a placeholder-only opener still has a source. A turn
+/// with no `title`, or an interruption marker, never titles: the user did
+/// not type it to say what the session is for.
+fn push_user(session: &mut Session, at: Option<Timestamp>, text: String, title: Option<&str>) {
+    if session.title_source.is_none()
+        && let Some(title) = title
+        && !INTERRUPTIONS.contains(&title.trim())
+    {
         session.title_source = Some(if title.is_empty() {
             text.clone()
         } else {
@@ -1310,6 +1367,33 @@ mod tests {
             s.title_source.as_deref(),
             Some("[Request interrupted by user] then do this")
         );
+    }
+
+    #[test]
+    fn argless_builtin_command_does_not_title() {
+        let command = |name: &str, args: &str| {
+            user(json!(format!(
+                "<command-name>{name}</command-name><command-args>{args}</command-args>"
+            )))
+        };
+        for name in ["/clear", "/exit", "/model", "/plugin", "/theme", "/login"] {
+            let s = parse_all(&[command(name, ""), user(json!("Fix the parser"))]);
+            assert_eq!(
+                lines(&s),
+                [format!("user: {name}"), "user: Fix the parser".into()]
+            );
+            assert_eq!(s.title_source.as_deref(), Some("Fix the parser"), "{name}");
+        }
+        let s = parse_all(&[command("/model", ""), command("/exit", "")]);
+        assert!(!s.is_empty());
+        assert_eq!(s.title_source.as_deref(), Some("/model"));
+        // A skill or prompt command is what the user asked for.
+        for name in ["/release", "/init"] {
+            let s = parse_all(&[command(name, ""), user(json!("later"))]);
+            assert_eq!(s.title_source.as_deref(), Some(name));
+        }
+        let s = parse_all(&[command("/model", "fable"), user(json!("later"))]);
+        assert_eq!(s.title_source.as_deref(), Some("fable"));
     }
 
     #[test]
