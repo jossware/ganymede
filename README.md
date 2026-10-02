@@ -97,6 +97,8 @@ an untrusted hook or skips it silently.
 
 Archives the session named by a hook payload on stdin. It reads
 `transcript_path` from the payload. Both harnesses send the same shape.
+A null `transcript_path` means the session was never persisted, and
+the hook does nothing.
 
 | Flag | Default | |
 |---|---|---|
