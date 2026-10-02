@@ -151,9 +151,9 @@ pub fn parse(records: &Records, session: &mut Session) -> Result<(), LoadError> 
 }
 
 fn metadata(record: &Value, session: &mut Session) {
-    if session.id.is_empty()
-        && let Some(id) = non_empty(record, "sessionId")
-    {
+    // The last id wins: Claude Code 2.1.32–2.1.63 could open a transcript
+    // with a record carrying the previous session's id.
+    if let Some(id) = non_empty(record, "sessionId") {
         session.id = id.to_string();
     }
     if session.harness_version.is_none()
@@ -1005,16 +1005,24 @@ mod tests {
     }
 
     #[test]
-    fn metadata_takes_first_non_empty_values() {
+    fn empty_cwd_is_skipped() {
         let mut first = user(json!("a"));
-        first["sessionId"] = json!("first");
         first["cwd"] = json!("");
         let mut second = user(json!("b"));
-        second["sessionId"] = json!("second");
         second["cwd"] = json!("/real");
         let s = parse_all(&[first, second]);
-        assert_eq!(s.id, "first");
         assert_eq!(s.cwds, [PathBuf::from("/real")]);
+    }
+
+    #[test]
+    fn carried_over_session_id_does_not_name_the_session() {
+        let mut opener = user(json!([text("[Request interrupted by user for tool use]")]));
+        opener["sessionId"] = json!("previous");
+        let mut side = user(json!("hidden"));
+        side["isSidechain"] = json!(true);
+        side["sessionId"] = json!("sidechain");
+        let s = parse_all(&[opener, user(json!("Implement the plan")), side]);
+        assert_eq!(s.id, "sess-1");
     }
 
     #[test]
