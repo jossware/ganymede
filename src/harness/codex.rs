@@ -52,6 +52,8 @@ const BROWSER_OPEN: &str = "<in-app-browser-context";
 const BROWSER_CLOSE: &str = "</in-app-browser-context>";
 const REPLY_OPEN: &str = "<send_user_message_question_reply>";
 const REPLY_CLOSE: &str = "</send_user_message_question_reply>";
+const HANDOFF_OPEN: &str = "Continuing from [";
+const HANDOFF_LINK: &str = "](chatgpt-conversation://";
 
 const INTERACTIVE_SOURCES: &[&str] = &["cli", "vscode"];
 
@@ -492,8 +494,16 @@ fn strip_browser_context(text: &str) -> String {
     out
 }
 
-/// A `$skill` invocation is titled by its arguments when it has any.
+/// A `$skill` invocation is titled by its arguments when it has any. A
+/// ChatGPT handoff is titled by the conversation's name: the request after
+/// the link is ChatGPT's paraphrase, not the user's words.
 fn title_source(text: &str) -> String {
+    if let Some(rest) = text.strip_prefix(HANDOFF_OPEN)
+        && let Some((name, _)) = rest.split_once(HANDOFF_LINK)
+        && !name.trim().is_empty()
+    {
+        return name.to_string();
+    }
     if let Some(invocation) = text.strip_prefix('$')
         && let Some((skill, args)) = invocation.split_once(char::is_whitespace)
         && !skill.is_empty()
@@ -730,12 +740,24 @@ mod tests {
     }
 
     #[test]
+    fn handoff_titles_by_chatgpt_conversation() {
+        assert_eq!(
+            session("handoff.jsonl").title_source.as_deref(),
+            Some("Fix the Build")
+        );
+    }
+
+    #[test]
     fn title_source_rules() {
         assert_eq!(title_source("$code-review check the CSS"), "check the CSS");
         assert_eq!(title_source("$standup"), "$standup");
         assert_eq!(title_source("$standup   "), "$standup   ");
         assert_eq!(title_source("$ spaced"), "$ spaced");
         assert_eq!(title_source("plain text"), "plain text");
+        let empty = "Continuing from [](chatgpt-conversation://x): Check CI";
+        assert_eq!(title_source(empty), empty);
+        let web = "Continuing from [the docs](https://example.com): Check CI";
+        assert_eq!(title_source(web), web);
     }
 
     #[test]
@@ -1236,6 +1258,7 @@ mod tests {
             "desktop_chat.jsonl",
             "skill_only.jsonl",
             "edges.jsonl",
+            "handoff.jsonl",
             "legacy_interactive.jsonl",
         ] {
             assert_eq!(session(name).unhandled, BTreeMap::new(), "{name}");
