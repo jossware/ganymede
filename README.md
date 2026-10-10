@@ -17,16 +17,19 @@ their employers' doings in the club book.
 
 ## Install
 
-ganymede is packaged as a Nix flake. The repository is private, so
-fetch it over SSH:
+ganymede is packaged as a Nix flake:
 
 ```sh
-nix profile install git+ssh://git@github.com/ryane/ganymede
+nix profile install github:ryane/ganymede
 ```
 
-Or add it as a flake input with the same URL and use
-`packages.<system>.default`. From a checkout, run `nix build` or
-`nix profile install .`.
+Or add it as a flake input and use `packages.<system>.default`:
+
+```nix
+inputs.ganymede.url = "github:ryane/ganymede";
+```
+
+From a checkout, run `nix build` or `nix profile install .`.
 
 ## Hook setup
 
@@ -279,3 +282,7 @@ with `cargo insta review`.
 
 Adapter fixtures are synthetic transcripts in `tests/fixtures/`. See
 [its README](tests/fixtures/README.md) to regenerate them.
+
+## License
+
+[MIT](LICENSE)

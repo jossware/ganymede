@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = "2024"
 description = "Archive agent sessions from Claude Code and Codex into an Obsidian vault"
 repository = "https://github.com/ryane/ganymede"
+license = "MIT"
 publish = false
 
 [dependencies]

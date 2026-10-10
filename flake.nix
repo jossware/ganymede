@@ -24,7 +24,10 @@
           inherit (manifest) version;
           src = pkgs.lib.cleanSource ./.;
           cargoLock.lockFile = ./Cargo.lock;
-          meta.mainProgram = manifest.name;
+          meta = {
+            mainProgram = manifest.name;
+            license = pkgs.lib.licenses.mit;
+          };
         };
 
         devShells.default = pkgs.mkShell {
