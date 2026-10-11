@@ -20,13 +20,13 @@ their employers' doings in the club book.
 ganymede is packaged as a Nix flake:
 
 ```sh
-nix profile install github:ryane/ganymede
+nix profile install github:jossware/ganymede
 ```
 
 Or add it as a flake input and use `packages.<system>.default`:
 
 ```nix
-inputs.ganymede.url = "github:ryane/ganymede";
+inputs.ganymede.url = "github:jossware/ganymede";
 ```
 
 From a checkout, run `nix build` or `nix profile install .`.
