@@ -39,7 +39,7 @@ pub enum Command {
 
 #[derive(Debug, Args)]
 pub struct RenderOpts {
-    /// Archive root [default: ~/org/Calendar/AI]
+    /// Archive root. Required by `hook` and `render --write`.
     #[arg(long)]
     pub dir: Option<PathBuf>,
     /// Transcript format; detected when omitted.

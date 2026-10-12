@@ -37,15 +37,15 @@ pub fn error_log(state: &Path) -> PathBuf {
     state.join("errors.jsonl")
 }
 
-/// The archive root: `--dir`, else `~/org/Calendar/AI`. Codex may run
-/// the hook without a shell, so a leading `~/` is expanded here.
-pub fn archive_dir(dir: Option<&Path>, home: &Path) -> PathBuf {
-    match dir {
-        None => home.join("org/Calendar/AI"),
-        Some(dir) => match dir.strip_prefix("~") {
-            Ok(rest) => home.join(rest),
-            Err(_) => dir.to_path_buf(),
-        },
+pub const DIR_REQUIRED: &str = "--dir is required: pass the archive root";
+
+/// The archive root from `--dir`. There is no default: vault layouts
+/// differ. Codex may run the hook without a shell, so a leading `~/` is
+/// expanded here.
+pub fn archive_dir(dir: &Path, home: &Path) -> PathBuf {
+    match dir.strip_prefix("~") {
+        Ok(rest) => home.join(rest),
+        Err(_) => dir.to_path_buf(),
     }
 }
 
@@ -113,19 +113,18 @@ mod tests {
     }
 
     #[test]
-    fn archive_dir_defaults_and_expands_tilde() {
+    fn archive_dir_expands_tilde() {
         let home = Path::new("/h");
-        assert_eq!(archive_dir(None, home), Path::new("/h/org/Calendar/AI"));
         assert_eq!(
-            archive_dir(Some(Path::new("~/vault/AI")), home),
+            archive_dir(Path::new("~/vault/AI"), home),
             Path::new("/h/vault/AI")
         );
         assert_eq!(
-            archive_dir(Some(Path::new("/abs/AI")), home),
+            archive_dir(Path::new("/abs/AI"), home),
             Path::new("/abs/AI")
         );
         assert_eq!(
-            archive_dir(Some(Path::new("~user/AI")), home),
+            archive_dir(Path::new("~user/AI"), home),
             Path::new("~user/AI")
         );
     }

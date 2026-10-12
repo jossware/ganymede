@@ -37,6 +37,9 @@ Run `ganymede hook` on both `Stop` and `SessionEnd`. `Stop` keeps the
 note current after every turn. `SessionEnd` catches anything written
 after the last turn.
 
+`--dir` names the archive root, a folder in your Obsidian vault. It MUST
+already exist. The examples use `~/vault/AI`.
+
 The hook always exits 0. It never blocks or steers the harness. Its
 stdout is empty, except for a one-time alert on failure (see
 [Errors](#errors)).
@@ -49,10 +52,10 @@ In `~/.claude/settings.json`:
 {
   "hooks": {
     "Stop": [
-      { "hooks": [{ "type": "command", "command": "ganymede hook --thinking=false --tool-output=false" }] }
+      { "hooks": [{ "type": "command", "command": "ganymede hook --dir ~/vault/AI --thinking=false --tool-output=false" }] }
     ],
     "SessionEnd": [
-      { "hooks": [{ "type": "command", "command": "ganymede hook --thinking=false --tool-output=false" }] }
+      { "hooks": [{ "type": "command", "command": "ganymede hook --dir ~/vault/AI --thinking=false --tool-output=false" }] }
     ]
   }
 }
@@ -74,10 +77,10 @@ there.
 {
   "hooks": {
     "Stop": [
-      { "hooks": [{ "type": "command", "command": "ganymede hook --thinking=false --tool-output=false" }] }
+      { "hooks": [{ "type": "command", "command": "ganymede hook --dir ~/vault/AI --thinking=false --tool-output=false" }] }
     ],
     "SessionEnd": [
-      { "hooks": [{ "type": "command", "command": "ganymede hook --thinking=false --tool-output=false" }] }
+      { "hooks": [{ "type": "command", "command": "ganymede hook --dir ~/vault/AI --thinking=false --tool-output=false" }] }
     ]
   }
 }
@@ -105,7 +108,7 @@ the hook does nothing.
 
 | Flag | Default | |
 |---|---|---|
-| `--dir <DIR>` | `~/org/Calendar/AI` | Archive root. MUST already exist. |
+| `--dir <DIR>` | required | Archive root. MUST already exist. |
 | `--harness <claude\|codex>` | detected | Transcript format. |
 | `--thinking <true\|false>` | `true` | Include thinking blocks. |
 | `--tool-output <true\|false>` | `true` | Include tool output under each tool call. |
@@ -131,7 +134,7 @@ Use it to preview a note, or to backfill sessions the hook missed:
 
 ```sh
 for f in ~/.codex/sessions/2026/09/30/rollout-*.jsonl; do
-  ganymede render --write "$f"
+  ganymede render --write --dir ~/vault/AI "$f"
 done
 ```
 

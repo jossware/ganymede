@@ -40,8 +40,11 @@ fn render(
     };
     let opts = args.opts.render_options();
     if args.write {
+        let Some(dir) = &args.opts.dir else {
+            return Err(paths::DIR_REQUIRED.into());
+        };
         let lock = paths::archive_lock(state);
-        let dir = paths::archive_dir(args.opts.dir.as_deref(), home);
+        let dir = paths::archive_dir(dir, home);
         let req = Request {
             lock: &lock,
             dir: &dir,
