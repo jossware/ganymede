@@ -274,6 +274,20 @@ fn hook_reports_a_missing_archive_dir() {
 }
 
 #[test]
+fn hook_requires_an_archive_dir() {
+    let sb = Sandbox::new();
+    let run = sb.run(
+        sb.command(&["hook"]),
+        &payload(CLAUDE_ID, &fixture("claude/basic.jsonl")),
+    );
+    assert!(run.status.success());
+    let alert = assert_one_alert(&run.stdout);
+    assert!(alert.contains("(payload: --dir is required"), "{alert}");
+    assert_eq!(sb.entries()[0]["stage"], "payload");
+    assert!(sb.notes().is_empty());
+}
+
+#[test]
 fn hook_survives_a_bad_flag() {
     let sb = Sandbox::new();
     let input = payload(CLAUDE_ID, &fixture("claude/basic.jsonl"));
@@ -385,6 +399,19 @@ fn render_writes_into_the_archive() {
         run.stderr
             .ends_with(&format!("ganymede: archived {}\n", notes[0].display()))
     );
+}
+
+#[test]
+fn render_write_requires_an_archive_dir() {
+    let sb = Sandbox::new();
+    let transcript = fixture("claude/basic.jsonl");
+    let run = sb.run(
+        sb.command(&["render", transcript.to_str().unwrap(), "--write"]),
+        "",
+    );
+    assert!(!run.status.success());
+    assert!(run.stderr.contains("--dir is required"), "{}", run.stderr);
+    assert!(sb.notes().is_empty());
 }
 
 #[test]

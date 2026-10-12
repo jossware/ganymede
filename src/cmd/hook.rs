@@ -135,9 +135,20 @@ pub fn run(
         );
     };
 
+    let Some(dir) = &opts.dir else {
+        return fail(
+            env,
+            &ctx,
+            Stage::Payload,
+            paths::DIR_REQUIRED.to_string(),
+            out,
+            err,
+        );
+    };
+
     let render_opts = opts.render_options();
     let lock = paths::archive_lock(state);
-    let dir = paths::archive_dir(opts.dir.as_deref(), home);
+    let dir = paths::archive_dir(dir, home);
     let req = Request {
         lock: &lock,
         dir: &dir,
